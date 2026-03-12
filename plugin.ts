@@ -2500,6 +2500,62 @@ async function sendProactive(
   return { ok: false, error: 'Must specify userId, userIds, or openConversationId', usedAICard: false };
 }
 
+// ============ 消息处理中表情 ============
+
+/** 在用户消息上贴 🤔思考中 表情，表示正在处理 */
+async function addEmotionReply(config: any, data: any, log?: any): Promise<void> {
+  if (!data.msgId || !data.conversationId) return;
+  try {
+    const token = await getAccessToken(config);
+    await axios.post(`${DINGTALK_API}/v1.0/robot/emotion/reply`, {
+      robotCode: data.robotCode ?? config.clientId,
+      openMsgId: data.msgId,
+      openConversationId: data.conversationId,
+      emotionType: 2,
+      emotionName: '🤔思考中',
+      textEmotion: {
+        emotionId: '2659900',
+        emotionName: '🤔思考中',
+        text: '🤔思考中',
+        backgroundId: 'im_bg_1',
+      },
+    }, {
+      headers: { 'x-acs-dingtalk-access-token': token, 'Content-Type': 'application/json' },
+      timeout: 5_000,
+    });
+    log?.info?.(`[DingTalk][Emotion] 贴表情成功: msgId=${data.msgId}`);
+  } catch (err: any) {
+    log?.warn?.(`[DingTalk][Emotion] 贴表情失败（不影响主流程）: ${err.message}`);
+  }
+}
+
+/** 撤回用户消息上的 🤔思考中 表情 */
+async function recallEmotionReply(config: any, data: any, log?: any): Promise<void> {
+  if (!data.msgId || !data.conversationId) return;
+  try {
+    const token = await getAccessToken(config);
+    await axios.post(`${DINGTALK_API}/v1.0/robot/emotion/recall`, {
+      robotCode: data.robotCode ?? config.clientId,
+      openMsgId: data.msgId,
+      openConversationId: data.conversationId,
+      emotionType: 2,
+      emotionName: '🤔思考中',
+      textEmotion: {
+        emotionId: '2659900',
+        emotionName: '🤔思考中',
+        text: '🤔思考中',
+        backgroundId: 'im_bg_1',
+      },
+    }, {
+      headers: { 'x-acs-dingtalk-access-token': token, 'Content-Type': 'application/json' },
+      timeout: 5_000,
+    });
+    log?.info?.(`[DingTalk][Emotion] 撤回表情成功: msgId=${data.msgId}`);
+  } catch (err: any) {
+    log?.warn?.(`[DingTalk][Emotion] 撤回表情失败（不影响主流程）: ${err.message}`);
+  }
+}
+
 // ============ 核心消息处理 (AI Card Streaming) ============
 
 async function handleDingTalkMessage(params: {
@@ -2684,6 +2740,10 @@ async function handleDingTalkMessage(params: {
   }
   if (!userContent && imageLocalPaths.length === 0) return;
 
+  // ===== 贴处理中表情 =====
+  await addEmotionReply(dingtalkConfig, data, log);
+
+  try {
   // ===== 异步模式：立即回执 + 后台执行 + 主动推送结果 =====
   const asyncMode = dingtalkConfig.asyncMode === true;
   const proactiveTarget = isDirect
@@ -2916,6 +2976,10 @@ async function handleDingTalkMessage(params: {
         atUserId: !isDirect ? senderId : null,
       });
     }
+  }
+  } finally {
+    // ===== 撤回处理中表情 =====
+    await recallEmotionReply(dingtalkConfig, data, log);
   }
 }
 
