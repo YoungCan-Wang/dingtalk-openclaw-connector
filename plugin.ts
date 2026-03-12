@@ -1388,16 +1388,13 @@ interface GatewayOptions {
 }
 
 async function* streamFromGateway(options: GatewayOptions, accountId: string): AsyncGenerator<string, void, unknown> {
-  const { userContent, systemPrompts, sessionKey, gatewayAuth, imageLocalPaths, gatewayBaseUrl, log } = options;
-  const rt = getRuntime();
   // 支持自定义 Gateway URL（如通过 Nginx 代理），用于 TLS 等场景
-  const gatewayUrl = gatewayBaseUrl
-    ? `${gatewayBaseUrl}/v1/chat/completions`
-    : `http://127.0.0.1:${rt.gateway?.port || 18789}/v1/chat/completions`;
-  const { userContent, systemPrompts, sessionKey, gatewayAuth, memoryUser, imageLocalPaths, peerKind, peerId, gatewayPort, log } = options;
+  const { userContent, systemPrompts, sessionKey, gatewayAuth, gatewayBaseUrl, memoryUser, imageLocalPaths, peerKind, peerId, gatewayPort, log } = options;
   const rt = getRuntime();
   const port = gatewayPort || rt.gateway?.port || 18789;
-  const gatewayUrl = `http://127.0.0.1:${port}/v1/chat/completions`;
+  const gatewayUrl = gatewayBaseUrl
+    ? `${gatewayBaseUrl}/v1/chat/completions`
+    : `http://127.0.0.1:${port}/v1/chat/completions`;
 
   const messages: any[] = [];
   for (const prompt of systemPrompts) {
