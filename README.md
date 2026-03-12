@@ -87,6 +87,7 @@ openclaw plugins install -l .
   "channels": {
     "dingtalk-connector": {
       "enabled": true,
+      "gatewayBaseUrl": "http://localhost:18789", // 可选：如果Gateway地址是TLS/HTTPS，see PR #117
       "clientId": "dingxxxxxxxxx",       // 钉钉 AppKey
       "clientSecret": "your_secret_here", // 钉钉 AppSecret
       "gatewayToken": "",                 // 可选：Gateway 认证 token, openclaw.json配置中 gateway.auth.token 的值 
