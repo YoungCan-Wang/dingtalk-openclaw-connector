@@ -27,6 +27,24 @@ import {
 } from "./media.js";
 import { getAccessToken, getOapiAccessToken } from "./utils.js";
 
+// ============ 新会话命令归一化 ============
+
+/** 新会话触发命令 */
+const NEW_SESSION_COMMANDS = ['/new', '/reset', '/clear', '新会话', '重新开始', '清空对话'];
+
+/**
+ * 将新会话命令归一化为标准的 /new 命令
+ * 支持多种别名：/new、/reset、/clear、新会话、重新开始、清空对话
+ */
+export function normalizeSlashCommand(text: string): string {
+  const trimmed = text.trim();
+  const lower = trimmed.toLowerCase();
+  if (NEW_SESSION_COMMANDS.some(cmd => lower === cmd.toLowerCase())) {
+    return '/new';
+  }
+  return text;
+}
+
 export type CreateDingtalkReplyDispatcherParams = {
   cfg: ClawdbotConfig;
   agentId: string;
@@ -66,7 +84,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
   
   // ✅ 节流控制：避免频繁调用钉钉 API 导致 QPS 限流
   let lastUpdateTime = 0;
-  const updateInterval = 300; // 最小更新间隔 300ms（与老版本保持一致）
+  const updateInterval = 1000; // 最小更新间隔 1000ms（钉钉 QPS 限制：40次/秒，安全起见设为 1 秒）
 
   // 打字指示器回调（钉钉暂不支持，预留接口）
   const typingCallbacks = createTypingCallbacks({
@@ -415,14 +433,24 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
               debug: params.runtime.debug,
             };
             
-            await streamAICard(
-              currentCardTarget as AICardInstance,
-              displayContent,
-              false,
-              logger
-            );
-            
-            lastUpdateTime = now;
+            try {
+              await streamAICard(
+                currentCardTarget as AICardInstance,
+                displayContent,
+                false,
+                logger
+              );
+              lastUpdateTime = now;
+            } catch (err: any) {
+              // ✅ 捕获限流错误，避免 Unhandled promise rejection
+              if (err.response?.status === 403 && err.response?.data?.code?.includes('QpsLimit')) {
+                console.log(`[onPartialReply] 遇到 QPS 限流，跳过本次更新`);
+                // 不更新 lastUpdateTime，下次会重试
+              } else {
+                console.error(`[onPartialReply] AI Card 更新失败:`, err.message);
+                throw err; // 其他错误继续抛出
+              }
+            }
           } else {
             console.log(`[onPartialReply] 节流跳过更新: 距上次更新 ${now - lastUpdateTime}ms < ${updateInterval}ms`);
           }

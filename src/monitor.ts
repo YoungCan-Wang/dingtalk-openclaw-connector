@@ -47,6 +47,14 @@ export async function monitorDingtalkProvider(opts: MonitorDingtalkOpts = {}): P
   const { resolveDingtalkAccount, listEnabledDingtalkAccounts } = accountsModule;
   const { handleDingTalkMessage } = monitorAccountModule;
   const { monitorSingleAccount, resolveReactionSyntheticEvent } = monitorSingleModule;
+  
+  // 调试：检查导入的函数类型
+  log?.info?.(`[monitorDingtalkProvider] handleDingTalkMessage 类型：${typeof handleDingTalkMessage}`);
+  log?.info?.(`[monitorDingtalkProvider] handleDingTalkMessage 是否为函数：${typeof handleDingTalkMessage === 'function'}`);
+  if (typeof handleDingTalkMessage !== 'function') {
+    log?.error?.(`[monitorDingtalkProvider] handleDingTalkMessage 不是函数！实际值：`, handleDingTalkMessage);
+    log?.error?.(`[monitorDingtalkProvider] monitorAccountModule keys:`, Object.keys(monitorAccountModule));
+  }
 
   if (opts.accountId) {
     log?.info?.(`[monitorDingtalkProvider] 监控单个账号：${opts.accountId}`);

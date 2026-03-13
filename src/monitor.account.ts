@@ -5,7 +5,6 @@ import {
   isMessageProcessed, 
   markMessageProcessed, 
   buildSessionContext,
-  normalizeSlashCommand,
   getAccessToken,
   getOapiAccessToken,
   DINGTALK_API,
@@ -22,7 +21,7 @@ import {
   VIDEO_MARKER_PATTERN,
   AUDIO_MARKER_PATTERN
 } from "./media";
-import { createDingtalkReplyDispatcher } from "./reply-dispatcher.js";
+import { createDingtalkReplyDispatcher, normalizeSlashCommand } from "./reply-dispatcher.js";
 import { getDingtalkRuntime } from "./runtime.js";
 import axios from 'axios';
 import * as fs from 'fs';
@@ -31,7 +30,7 @@ import * as os from 'os';
 
 // ============ 常量 ============
 
-const AI_CARD_TEMPLATE_ID = '382e4302-551d-4880-bf29-a30acfab2e71.schema';
+const AI_CARD_TEMPLATE_ID = '02fcf2f4-5e02-4a85-b672-46d1f715543e.schema';
 
 const AICardStatus = {
   PROCESSING: '1',
@@ -262,7 +261,7 @@ interface HandleMessageParams {
   cfg: ClawdbotConfig;
 }
 
-async function handleDingTalkMessage(params: HandleMessageParams): Promise<void> {
+export async function handleDingTalkMessage(params: HandleMessageParams): Promise<void> {
   const { accountId, config, data, sessionWebhook, runtime, log, cfg } = params;
 
   const content = extractMessageContent(data);
@@ -299,8 +298,12 @@ async function handleDingTalkMessage(params: HandleMessageParams): Promise<void>
   log?.info?.(`[DingTalk][Session] context=${sessionContextJson}`);
 
   // 构建消息内容
+  // ✅ 使用 normalizeSlashCommand 归一化新会话命令
   const rawText = content.text || '';
-  let userContent = normalizeSlashCommand(rawText) || (content.imageUrls.length > 0 ? '请描述这张图片' : '');
+  
+  // 归一化命令（将 /reset、/clear、新会话 等别名统一为 /new）
+  const normalizedText = normalizeSlashCommand(rawText);
+  let userContent = normalizedText || (content.imageUrls.length > 0 ? '请描述这张图片' : '');
 
   // ===== 图片下载到本地文件 =====
   const imageLocalPaths: string[] = [];
@@ -428,8 +431,65 @@ async function handleDingTalkMessage(params: HandleMessageParams): Promise<void>
     });
     console.log(`[DingTalk][${accountId}] body 构建完成: ${body.substring(0, 100)}...`);
 
-    // 构建 inbound context
+    // ✅ 【关键修复】手动实现路由匹配（支持通配符 *）
+    console.log(`[DingTalk][${accountId}] 开始解析 agent 路由...`);
+    const chatType = isDirect ? "direct" : "group";
+    const peerId = isDirect ? senderId : data.conversationId;
+    
+    console.log(`[DingTalk][${accountId}] 路由参数: channel=dingtalk-connector, accountId=${accountId}, peer={kind:${chatType}, id:${peerId}}`);
+    
+    // 手动匹配 bindings（支持通配符 *）
+    let matchedAgentId: string | null = null;
+    let matchedBy = 'default';
+    
+    if (cfg.bindings && cfg.bindings.length > 0) {
+      for (const binding of cfg.bindings) {
+        const match = binding.match;
+        
+        // 检查 channel
+        if (match.channel && match.channel !== "dingtalk-connector") {
+          continue;
+        }
+        
+        // 检查 accountId
+        if (match.accountId && match.accountId !== accountId) {
+          continue;
+        }
+        
+        // 检查 peer
+        if (match.peer) {
+          // 检查 peer.kind
+          if (match.peer.kind && match.peer.kind !== chatType) {
+            continue;
+          }
+          
+          // 检查 peer.id（支持通配符 *）
+          if (match.peer.id && match.peer.id !== '*' && match.peer.id !== peerId) {
+            continue;
+          }
+        }
+        
+        // 匹配成功
+        matchedAgentId = binding.agentId;
+        matchedBy = 'binding';
+        console.log(`[DingTalk][${accountId}] ✅ 匹配成功: agentId=${matchedAgentId}, binding=${JSON.stringify(binding.match)}`);
+        break;
+      }
+    }
+    
+    // 如果没有匹配到，使用默认 agent
+    if (!matchedAgentId) {
+      matchedAgentId = cfg.defaultAgent || 'ding-bot1';
+      console.log(`[DingTalk][${accountId}] ⚠️ 未匹配到 binding，使用默认 agent: ${matchedAgentId}`);
+    }
+    
+    // 构建 sessionKey
+    const sessionKey = `agent:${matchedAgentId}:dingtalk-connector:${chatType}:${peerId}`;
+    console.log(`[DingTalk][${accountId}] 路由解析完成: agentId=${matchedAgentId}, sessionKey=${sessionKey}, matchedBy=${matchedBy}`);
+    
+    // 构建 inbound context，使用解析后的 sessionKey
     console.log(`[DingTalk][${accountId}] 开始构建 inbound context...`);
+    
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
       BodyForAgent: finalContent,
@@ -437,9 +497,9 @@ async function handleDingTalkMessage(params: HandleMessageParams): Promise<void>
       CommandBody: userContent,
       From: senderId,
       To: accountId,
-      SessionKey: `dingtalk:${accountId}:${isDirect ? senderId : data.conversationId}`,
+      SessionKey: sessionKey,  // ✅ 使用手动匹配的 sessionKey
       AccountId: accountId,
-      ChatType: isDirect ? "direct" : "group",
+      ChatType: chatType,
       GroupSubject: isDirect ? undefined : data.conversationId,
       SenderName: senderId,
       SenderId: senderId,
@@ -453,11 +513,12 @@ async function handleDingTalkMessage(params: HandleMessageParams): Promise<void>
     });
     console.log(`[DingTalk][${accountId}] ctxPayload 构建完成, SessionKey: ${ctxPayload.SessionKey}`);
 
-    // 创建 reply dispatcher
+    // 创建 reply dispatcher，使用解析后的 agentId
     console.log(`[DingTalk][${accountId}] 开始创建 reply dispatcher...`);
+    
     const { dispatcher, replyOptions, markDispatchIdle } = createDingtalkReplyDispatcher({
       cfg,
-      agentId: accountId,
+      agentId: matchedAgentId,  // ✅ 使用手动匹配的 agentId
       runtime: runtime as RuntimeEnv,
       conversationId: data.conversationId,
       senderId,
@@ -466,7 +527,7 @@ async function handleDingTalkMessage(params: HandleMessageParams): Promise<void>
       messageCreateTimeMs: Date.now(),
       sessionWebhook: data.sessionWebhook,
     });
-    console.log(`[DingTalk][${accountId}] reply dispatcher 创建完成`);
+    console.log(`[DingTalk][${accountId}] reply dispatcher 创建完成，使用 agentId: ${matchedAgentId}`);
     console.log(`[DingTalk][${accountId}] replyOptions keys:`, Object.keys(replyOptions));
     console.log(`[DingTalk][${accountId}] replyOptions.onModelSelected:`, typeof replyOptions.onModelSelected);
     console.log(`[DingTalk][${accountId}] replyOptions.onPartialReply:`, typeof replyOptions.onPartialReply);
@@ -515,5 +576,4 @@ async function handleDingTalkMessage(params: HandleMessageParams): Promise<void>
   }
 }
 
-// 导出消息处理函数，供 monitor.ts 使用
-export { handleDingTalkMessage };
+// handleDingTalkMessage 已在函数定义处直接导出

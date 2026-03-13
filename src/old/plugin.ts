@@ -1103,7 +1103,7 @@ async function processFileMarkers(
 
 const DINGTALK_API = 'https://api.dingtalk.com';
 const DINGTALK_OAPI = 'https://oapi.dingtalk.com';
-const AI_CARD_TEMPLATE_ID = '382e4302-551d-4880-bf29-a30acfab2e71.schema';
+const AI_CARD_TEMPLATE_ID = '02fcf2f4-5e02-4a85-b672-46d1f715543e.schema';
 
 // flowStatus 值与 Python SDK AICardStatus 一致（cardParamMap 的值必须是字符串）
 const AICardStatus = {
@@ -1139,6 +1139,45 @@ async function createAICard(
     : { type: 'user', userId: data.senderStaffId || data.senderId };
 
   return createAICardForTarget(config, target, log);
+}
+
+/**
+ * 确保 Markdown 表格前有空行，否则钉钉无法正确渲染表格。
+ *
+ * 逐行向前看：当前行像表头（含 `|`）且下一行是分隔行时，
+ * 若前一行非空且非表格行，则在表头前插入空行。
+ * 支持缩进表格（行首有空白字符）。
+ */
+function ensureTableBlankLines(text: string): string {
+  const lines = text.split('\n');
+  const result: string[] = [];
+
+  // 匹配表格分隔行 (例如 | --- | --- | 或 --- | ---)
+  const tableDividerRegex = /^\s*\|?\s*:?-+:?\s*(\|?\s*:?-+:?\s*)+\|?\s*$/;
+  // 匹配包含竖线的表格行
+  const tableRowRegex = /^\s*\|?.*\|.*\|?\s*$/;
+
+  const isDivider = (line: string) => line.includes('|') && tableDividerRegex.test(line);
+
+  for (let i = 0; i < lines.length; i++) {
+    const currentLine = lines[i];
+    const nextLine = lines[i + 1] ?? '';
+
+    // 逻辑：
+    // 1. 当前行看起来像表头（包含 |）
+    // 2. 下一行是分隔行（---）
+    // 3. 前一行不是空行且不是表格行
+    if (
+      tableRowRegex.test(currentLine) &&
+      isDivider(nextLine) &&
+      i > 0 && lines[i - 1].trim() !== '' && !tableRowRegex.test(lines[i - 1])
+    ) {
+      result.push('');
+    }
+
+    result.push(currentLine);
+  }
+  return result.join('\n');
 }
 
 // 流式更新 AI Card 内容
@@ -1177,11 +1216,12 @@ async function streamAICard(
   }
 
   // 调用 streaming API 更新内容
+  const fixedContent = ensureTableBlankLines(content);
   const body = {
     outTrackId: card.cardInstanceId,
     guid: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     key: 'msgContent',
-    content: content,
+    content: fixedContent,
     isFull: true,  // 全量替换
     isFinalize: finished,
     isError: false,
@@ -1205,10 +1245,11 @@ async function finishAICard(
   content: string,
   log?: any,
 ): Promise<void> {
-  log?.info?.(`[DingTalk][AICard] 开始 finish，最终内容长度=${content.length}`);
+  const fixedContent = ensureTableBlankLines(content);
+  log?.info?.(`[DingTalk][AICard] 开始 finish，最终内容长度=${fixedContent.length}`);
 
   // 1. 先用最终内容关闭流式通道（isFinalize=true），确保卡片显示替换后的内容
-  await streamAICard(card, content, true, log);
+  await streamAICard(card, fixedContent, true, log);
 
   // 2. 更新卡片状态为 FINISHED
   const body = {
@@ -1216,7 +1257,7 @@ async function finishAICard(
     cardData: {
       cardParamMap: {
         flowStatus: AICardStatus.FINISHED,
-        msgContent: content,
+        msgContent: fixedContent,
         staticMsgContent: '',
         sys_full_json_obj: JSON.stringify({
           order: ['msgContent'],  // 只声明实际使用的字段，避免部分客户端显示空占位
@@ -1698,7 +1739,7 @@ async function sendMarkdownMessage(
   options: any = {},
 ): Promise<any> {
   const token = await getAccessToken(config);
-  let text = markdown;
+  let text = ensureTableBlankLines(markdown);
   if (options.atUserId) text = `${text} @${options.atUserId}`;
 
   const body: any = {
@@ -2235,7 +2276,7 @@ function buildMsgPayload(
         msgKey: 'sampleMarkdown',
         msgParam: {
           title: title || content.split('\n')[0].replace(/^[#*\s\->]+/, '').slice(0, 20) || 'Message',
-          text: content,
+          text: ensureTableBlankLines(content),
         },
       };
     case 'link':
@@ -3532,15 +3573,15 @@ const dingtalkPlugin = {
           ctx.log?.info?.(`[DingTalk] 已立即确认回调: messageId=${messageId}`);
         }
 
-        // 【消息去重】检查是否已处理过该消息（按账号维度隔离）
-        if (messageId && isMessageProcessed(account.accountId, messageId)) {
+        // 【消息去重】检查是否已处理过该消息
+        if (messageId && isMessageProcessed(messageId)) {
           ctx.log?.warn?.(`[DingTalk][${account.accountId}] 检测到重复消息，跳过处理: messageId=${messageId}`);
           return;
         }
 
-        // 标记消息为已处理（按账号维度隔离）
+        // 标记消息为已处理
         if (messageId) {
-          markMessageProcessed(account.accountId, messageId);
+          markMessageProcessed(messageId);
         }
 
         // 异步处理消息（不阻塞回调确认）
@@ -3939,6 +3980,8 @@ export {
 // ============ 测试辅助导出 ============
 // 仅用于单元测试，避免在业务代码中直接依赖内部实现细节
 export const __testables = {
+  // Markdown 修正
+  ensureTableBlankLines,
   // 会话 & 去重
   normalizeSlashCommand,
   buildSessionContext,

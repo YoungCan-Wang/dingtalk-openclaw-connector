@@ -10,7 +10,7 @@ import { processLocalImages, processVideoMarkers, processAudioMarkers, processFi
 
 // ============ 常量 ============
 
-const AI_CARD_TEMPLATE_ID = '382e4302-551d-4880-bf29-a30acfab2e71.schema';
+const AI_CARD_TEMPLATE_ID = '02fcf2f4-5e02-4a85-b672-46d1f715543e.schema';
 
 /** AI Card 状态 */
 const AICardStatus = {
