@@ -1,16 +1,16 @@
 import type { ClawdbotConfig, RuntimeEnv } from "openclaw/plugin-sdk";
-import { listEnabledDingtalkAccounts, resolveDingtalkAccount } from "./accounts.js";
+import { listEnabledDingtalkAccounts, resolveDingtalkAccount } from "./accounts.ts";
 import {
   monitorSingleAccount,
   resolveReactionSyntheticEvent,
   type DingtalkReactionCreatedEvent,
-} from "./monitor.account.js";
+} from "./monitor.account.ts";
 import {
   clearDingtalkWebhookRateLimitStateForTest,
   getDingtalkWebhookRateLimitStateSizeForTest,
   isWebhookRateLimitedForTest,
   stopDingtalkMonitorState,
-} from "./monitor.state.js";
+} from "./monitor.state.ts";
 
 export type MonitorDingtalkOpts = {
   config?: ClawdbotConfig;

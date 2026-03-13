@@ -9,25 +9,25 @@ import {
   DEFAULT_ACCOUNT_ID,
   resolveAllowlistProviderRuntimeGroupPolicy,
   resolveDefaultGroupPolicy,
-} from "./sdk-helpers.js";
+} from "./sdk-helpers.ts";
 import {
   resolveDingtalkAccount,
   resolveDingtalkCredentials,
   listDingtalkAccountIds,
   resolveDefaultDingtalkAccountId,
-} from "./accounts.js";
+} from "./accounts.ts";
 import {
   listDingtalkDirectoryPeers,
   listDingtalkDirectoryGroups,
   listDingtalkDirectoryPeersLive,
   listDingtalkDirectoryGroupsLive,
-} from "./directory.js";
-import { resolveDingtalkGroupToolPolicy } from "./policy.js";
-import { probeDingtalk } from "./probe.js";
-import { normalizeDingtalkTarget, looksLikeDingtalkId } from "./targets.js";
-import { dingtalkOnboardingAdapter } from "./onboarding.js";
-import { sendTextToDingTalk, sendMediaToDingTalk } from "./messaging.js";
-import type { ResolvedDingtalkAccount, DingtalkConfig } from "./types.js";
+} from "./directory.ts";
+import { resolveDingtalkGroupToolPolicy } from "./policy.ts";
+import { probeDingtalk } from "./probe.ts";
+import { normalizeDingtalkTarget, looksLikeDingtalkId } from "./targets.ts";
+import { dingtalkOnboardingAdapter } from "./onboarding.ts";
+import { sendTextToDingTalk, sendMediaToDingTalk } from "./messaging.ts";
+import type { ResolvedDingtalkAccount, DingtalkConfig } from "./types.ts";
 
 const meta: ChannelMeta = {
   id: "dingtalk-connector",
@@ -460,7 +460,11 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
   gateway: {
     startAccount: async (ctx) => {
       // TODO: Implement actual gateway start logic
-      const { monitorDingtalkProvider } = await import("./monitor.js");
+      const monitorModule = await import("./monitor.ts");
+      const { monitorDingtalkProvider } = monitorModule;
+      if (!monitorDingtalkProvider) {
+        throw new Error("monitorDingtalkProvider not found in monitor module");
+      }
       const account = resolveDingtalkAccount({ cfg: ctx.cfg, accountId: ctx.accountId });
       ctx.setStatus({ accountId: ctx.accountId, port: null });
       ctx.log?.info(

@@ -1,5 +1,5 @@
-import { raceWithTimeoutAndAbort } from "./async.js";
-import type { DingtalkProbeResult } from "./types.js";
+import { raceWithTimeoutAndAbort } from "./async.ts";
+import type { DingtalkProbeResult } from "./types.ts";
 
 /** Cache probe results to reduce repeated health-check calls. */
 const probeCache = new Map<string, { result: DingtalkProbeResult; expiresAt: number }>();

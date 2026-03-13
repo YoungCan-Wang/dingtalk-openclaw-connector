@@ -11,11 +11,11 @@ import {
   DEFAULT_ACCOUNT_ID,
   formatDocsLink,
   hasConfiguredSecretInput,
-} from "./sdk-helpers.js";
+} from "./sdk-helpers.ts";
 import { promptSingleChannelSecretInput } from "openclaw/plugin-sdk";
-import { resolveDingtalkCredentials } from "./accounts.js";
-import { probeDingtalk } from "./probe.js";
-import type { DingtalkConfig } from "./types.js";
+import { resolveDingtalkCredentials } from "./accounts.ts";
+import { probeDingtalk } from "./probe.ts";
+import type { DingtalkConfig } from "./types.ts";
 
 const channel = "dingtalk-connector" as const;
 

@@ -1,6 +1,6 @@
 import type { ClawdbotConfig } from "openclaw/plugin-sdk";
-import { resolveDingtalkAccount } from "./accounts.js";
-import { normalizeDingtalkTarget } from "./targets.js";
+import { resolveDingtalkAccount } from "./accounts.ts";
+import { normalizeDingtalkTarget } from "./targets.ts";
 
 export type DingtalkDirectoryPeer = {
   kind: "user";

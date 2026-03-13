@@ -1,12 +1,12 @@
-import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "./sdk-helpers.js";
+import { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "./sdk-helpers.ts";
 import type { ClawdbotConfig } from "openclaw/plugin-sdk";
-import { normalizeResolvedSecretInputString, normalizeSecretInputString } from "./sdk-helpers.js";
+import { normalizeResolvedSecretInputString, normalizeSecretInputString } from "./sdk-helpers.ts";
 import type {
   DingtalkConfig,
   DingtalkAccountConfig,
   DingtalkDefaultAccountSelectionSource,
   ResolvedDingtalkAccount,
-} from "./types.js";
+} from "./types.ts";
 
 /**
  * List all configured account IDs from the accounts field.

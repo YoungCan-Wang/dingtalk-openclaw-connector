@@ -1,6 +1,6 @@
 import { DWClient, TOPIC_ROBOT } from 'dingtalk-stream';
 import type { ClawdbotConfig, RuntimeEnv, HistoryEntry } from "openclaw/plugin-sdk";
-import type { ResolvedDingtalkAccount, DingtalkConfig } from "./types.js";
+import type { ResolvedDingtalkAccount, DingtalkConfig } from "./types.ts";
 import { 
   isMessageProcessed, 
   markMessageProcessed, 
@@ -10,13 +10,13 @@ import {
   getOapiAccessToken,
   DINGTALK_API,
   DINGTALK_OAPI
-} from "./utils.js";
+} from "./utils.ts";
 import { 
   createAICardForTarget, 
   streamAICard, 
   finishAICard,
   type AICardTarget 
-} from "./messaging.js";
+} from "./messaging.ts";
 import { 
   processLocalImages, 
   processVideoMarkers, 
@@ -27,7 +27,7 @@ import {
   FILE_MARKER_PATTERN,
   VIDEO_MARKER_PATTERN,
   AUDIO_MARKER_PATTERN
-} from "./media.js";
+} from "./media.ts";
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
