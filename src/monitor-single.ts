@@ -155,13 +155,29 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
     await client.connect();
     log(`[DingTalk][${accountId}] Connected to DingTalk Stream`);
 
+    // 连接状态追踪
+    let connectionStartTime = Date.now();
+    let reconnectCount = 0;
+
     // Handle disconnection
     client.on('close', () => {
-      log?.warn?.(`[DingTalk][${accountId}] Connection closed, will auto-reconnect...`);
+      const connectionDuration = Date.now() - connectionStartTime;
+      log?.info?.(`[DingTalk][${accountId}] Connection closed after ${Math.round(connectionDuration / 1000)}s, will auto-reconnect...`);
     });
 
     client.on('error', (err: Error) => {
       log?.error?.(`[DingTalk][${accountId}] Connection error: ${err.message}`);
+    });
+
+    // 监听重连事件（如果 SDK 支持）
+    client.on('reconnect', () => {
+      reconnectCount++;
+      connectionStartTime = Date.now();
+      log?.info?.(`[DingTalk][${accountId}] Reconnecting... (attempt ${reconnectCount})`);
+    });
+
+    client.on('reconnected', () => {
+      log?.info?.(`[DingTalk][${accountId}] Reconnected successfully after ${reconnectCount} attempts`);
     });
   });
 }

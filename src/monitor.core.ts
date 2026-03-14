@@ -46,6 +46,7 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
   const client = new DWClient({
     clientId: account.clientId,
     clientSecret: account.clientSecret,
+    debug: false, // 关闭 SDK 的 debug 日志，减少噪音
   });
 
   return new Promise<void>((resolve, reject) => {
@@ -112,15 +113,31 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
         reject(err);
       });
 
+    // 连接状态追踪
+    let connectionStartTime = Date.now();
+    let reconnectCount = 0;
+
     // Handle disconnection
     client.on('close', () => {
-      log(`[DingTalk][${accountId}] Connection closed`);
+      const connectionDuration = Date.now() - connectionStartTime;
+      log(`[DingTalk][${accountId}] Connection closed after ${Math.round(connectionDuration / 1000)}s`);
       resolve();
     });
 
     client.on('error', (err: Error) => {
       log(`[DingTalk][${accountId}] Connection error: ${err.message}`);
       reject(err);
+    });
+
+    // 监听重连事件（如果 SDK 支持）
+    client.on('reconnect', () => {
+      reconnectCount++;
+      connectionStartTime = Date.now();
+      log(`[DingTalk][${accountId}] Reconnecting... (attempt ${reconnectCount})`);
+    });
+
+    client.on('reconnected', () => {
+      log(`[DingTalk][${accountId}] Reconnected successfully after ${reconnectCount} attempts`);
     });
   });
 }
