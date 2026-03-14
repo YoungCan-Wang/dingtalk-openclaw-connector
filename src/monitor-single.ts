@@ -144,25 +144,67 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
     // Register message handler
     client.registerCallbackListener(TOPIC_ROBOT, async (res: any) => {
       const messageId = res.headers?.messageId;
+      const timestamp = new Date().toISOString();
+      
+      // ===== 第一步：记录原始消息接收 =====
+      console.log(`\n========== [DingTalk][${accountId}] 收到新消息 ==========`);
+      console.log(`时间: ${timestamp}`);
+      console.log(`MessageId: ${messageId || 'N/A'}`);
+      console.log(`Headers: ${JSON.stringify(res.headers || {})}`);
+      console.log(`Data 长度: ${res.data?.length || 0} 字符`);
 
       // 立即确认回调
       if (messageId) {
         client.socketCallBackResponse(messageId, { success: true });
+        console.log(`[DingTalk][${accountId}] ✅ 已立即确认回调: messageId=${messageId}`);
+      } else {
+        console.warn(`[DingTalk][${accountId}] ⚠️ 警告: 消息没有 messageId`);
       }
 
       // 消息去重
       if (messageId && isMessageProcessed(messageId)) {
-        log?.warn?.(`[DingTalk][${accountId}] Duplicate message skipped: ${messageId}`);
+        console.warn(`[DingTalk][${accountId}] ⚠️ 检测到重复消息，跳过处理: messageId=${messageId}`);
+        console.log(`========== 消息处理结束（重复） ==========\n`);
         return;
       }
 
       if (messageId) {
         markMessageProcessed(messageId);
+        console.log(`[DingTalk][${accountId}] 标记消息为已处理: messageId=${messageId}`);
       }
 
       // 异步处理消息
       try {
+        // 解析消息数据
         const data = JSON.parse(res.data);
+        
+        // ===== 第二步：记录解析后的消息详情 =====
+        console.log(`\n----- 消息详情 -----`);
+        console.log(`消息类型: ${data.msgtype || 'unknown'}`);
+        console.log(`会话类型: ${data.conversationType === '1' ? 'DM (单聊)' : data.conversationType === '2' ? 'Group (群聊)' : data.conversationType}`);
+        console.log(`发送者: ${data.senderNick || 'unknown'} (${data.senderStaffId || data.senderId || 'unknown'})`);
+        console.log(`会话ID: ${data.conversationId || 'N/A'}`);
+        console.log(`消息ID: ${data.msgId || 'N/A'}`);
+        console.log(`SessionWebhook: ${data.sessionWebhook ? '已提供' : '未提供'}`);
+        console.log(`RobotCode: ${data.robotCode || account.config?.clientId || 'N/A'}`);
+        
+        // 记录消息内容（简化版，避免过长）
+        let contentPreview = 'N/A';
+        if (data.text?.content) {
+          contentPreview = data.text.content.length > 100 
+            ? data.text.content.substring(0, 100) + '...' 
+            : data.text.content;
+        } else if (data.content) {
+          contentPreview = JSON.stringify(data.content).substring(0, 100) + '...';
+        }
+        console.log(`消息内容预览: ${contentPreview}`);
+        console.log(`完整数据字段: ${Object.keys(data).join(', ')}`);
+        console.log(`----- 消息详情结束 -----\n`);
+        
+        // ===== 第三步：开始处理消息 =====
+        console.log(`[DingTalk][${accountId}] 🚀 开始处理消息...`);
+        console.log(`AccountId: ${accountId}`);
+        console.log(`HasConfig: ${!!account.config}`);
         
         await messageHandler({
           accountId,
@@ -173,8 +215,16 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
           log,
           cfg: clawdbotConfig,
         });
+        
+        console.log(`[DingTalk][${accountId}] ✅ 消息处理完成`);
+        console.log(`========== 消息处理结束（成功） ==========\n`);
+        
       } catch (error: any) {
-        log?.error?.(`[DingTalk][${accountId}] Message processing error: ${error.message}`);
+        console.error(`\n[DingTalk][${accountId}] ❌ 处理消息异常:`);
+        console.error(`错误类型: ${error.name || 'Error'}`);
+        console.error(`错误信息: ${error.message}`);
+        console.error(`错误堆栈:\n${error.stack}`);
+        console.log(`========== 消息处理结束（失败） ==========\n`);
       }
     });
 

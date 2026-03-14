@@ -119,8 +119,12 @@ export async function uploadMediaToDingTalk(
 
     const mediaId = resp.data?.media_id;
     if (mediaId) {
-      log?.info?.(`[DingTalk][${mediaType}] 上传成功: media_id=${mediaId}`);
-      return mediaId;
+      // ✅ 去掉 media_id 前面的 @ 符号（如果有的话）
+      const cleanMediaId = mediaId.startsWith('@') ? mediaId.substring(1) : mediaId;
+      // ✅ 将 media_id 转换为钉钉下载链接
+      const downloadUrl = `https://down.dingtalk.com/media/${cleanMediaId}`;
+      log?.info?.(`[DingTalk][${mediaType}] 上传成功: media_id=${mediaId}, cleanMediaId=${cleanMediaId}, downloadUrl=${downloadUrl}`);
+      return downloadUrl;
     }
     log?.warn?.(`[DingTalk][${mediaType}] 上传返回无 media_id: ${JSON.stringify(resp.data)}`);
     return null;
@@ -164,7 +168,8 @@ export async function processLocalImages(
   const bareMatches = [...result.matchAll(BARE_IMAGE_PATH_RE)];
   const newBareMatches = bareMatches.filter((m) => {
     // 检查这个路径是否已经在 ![...](...) 中
-    const idx = m.index!;
+    if (m.index === undefined) return false;
+    const idx = m.index;
     const before = result.slice(Math.max(0, idx - 10), idx);
     return !before.includes('](');
   });
@@ -197,37 +202,76 @@ export interface VideoInfo {
 /**
  * 提取视频元数据（时长、分辨率）
  */
-async function extractVideoMetadata(
+export async function extractVideoMetadata(
   filePath: string,
   log?: any,
 ): Promise<{ duration: number; width: number; height: number } | null> {
   try {
-    // 使用 ffprobe 提取视频元数据
-    const { exec } = await import('child_process');
+    const ffmpeg = require('fluent-ffmpeg');
+    const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+    const ffprobePath = require('@ffprobe-installer/ffprobe').path;
+    ffmpeg.setFfmpegPath(ffmpegPath);
+    ffmpeg.setFfprobePath(ffprobePath);
+
     return new Promise((resolve) => {
-      exec(
-        `ffprobe -v error -show_entries format=duration -show_entries stream=width,height -of json "${filePath}"`,
-        (error: any, stdout: string) => {
-          if (error) {
-            log?.warn?.(`[DingTalk][Video] ffprobe 执行失败: ${error.message}`);
-            resolve(null);
-            return;
-          }
-          try {
-            const data = JSON.parse(stdout);
-            const duration = data.format?.duration ? Math.round(parseFloat(data.format.duration) * 1000) : 0;
-            const width = data.streams?.[0]?.width || 0;
-            const height = data.streams?.[0]?.height || 0;
-            resolve({ duration, width, height });
-          } catch (err) {
-            log?.warn?.(`[DingTalk][Video] 解析 ffprobe 输出失败`);
-            resolve(null);
-          }
-        },
-      );
+      ffmpeg.ffprobe(filePath, (err: any, metadata: any) => {
+        if (err) {
+          log?.warn?.(`[DingTalk][Video] ffprobe 执行失败: ${err.message}`);
+          resolve(null);
+          return;
+        }
+        try {
+          const duration = metadata.format?.duration ? Math.round(parseFloat(metadata.format.duration) * 1000) : 0;
+          const videoStream = metadata.streams?.find((s: any) => s.codec_type === 'video');
+          const width = videoStream?.width || 0;
+          const height = videoStream?.height || 0;
+          resolve({ duration, width, height });
+        } catch (err) {
+          log?.warn?.(`[DingTalk][Video] 解析 ffprobe 输出失败`);
+          resolve(null);
+        }
+      });
     });
   } catch (err: any) {
     log?.warn?.(`[DingTalk][Video] 提取视频元数据失败: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * 生成视频封面图（第1秒截图）
+ */
+export async function extractVideoThumbnail(
+  videoPath: string,
+  outputPath: string,
+  log?: any,
+): Promise<string | null> {
+  try {
+    const ffmpeg = require('fluent-ffmpeg');
+    const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+    const path = await import('path');
+    ffmpeg.setFfmpegPath(ffmpegPath);
+
+    return new Promise((resolve) => {
+      ffmpeg(videoPath)
+        .screenshots({
+          count: 1,
+          folder: path.dirname(outputPath),
+          filename: path.basename(outputPath),
+          timemarks: ['1'],
+          size: '?x360',
+        })
+        .on('end', () => {
+          log?.info?.(`[DingTalk][Video] 封面生成成功: ${outputPath}`);
+          resolve(outputPath);
+        })
+        .on('error', (err: any) => {
+          log?.error?.(`[DingTalk][Video] 封面生成失败: ${err.message}`);
+          resolve(null);
+        });
+    });
+  } catch (err: any) {
+    log?.error?.(`[DingTalk][Video] ffmpeg 失败: ${err.message}`);
     return null;
   }
 }
@@ -614,13 +658,13 @@ async function sendVideoMessage(
 /**
  * 发送视频消息（主动 API 模式）
  */
-async function sendVideoProactive(
+export async function sendVideoProactive(
   config: DingtalkConfig,
   target: any,
   videoMediaId: string,
-  fileName: string,
-  log?: any,
+  picMediaId: string,
   metadata?: { duration: number; width: number; height: number },
+  log?: any,
 ): Promise<void> {
   try {
     const token = await (await import('./utils.js')).getAccessToken(config);
@@ -631,7 +675,7 @@ async function sendVideoProactive(
       duration: metadata?.duration.toString() || '60000',
       videoMediaId: videoMediaId,
       videoType: 'mp4',
-      picMediaId: '', // 封面图 mediaId，可选
+      picMediaId: picMediaId || '', // 封面图 mediaId
     };
 
     const body: any = {
@@ -649,19 +693,21 @@ async function sendVideoProactive(
       endpoint = `${DINGTALK_API}/v1.0/robot/oToMessages/batchSend`;
     }
 
-    log?.info?.(`[DingTalk][Video][Proactive] 发送视频消息: ${fileName}`);
+    log?.info?.(`[DingTalk][Video][Proactive] 发送视频消息`);
+    log?.info?.(`[DingTalk][Video][Proactive] 请求体: ${JSON.stringify(body, null, 2)}`);
+    log?.info?.(`[DingTalk][Video][Proactive] endpoint: ${endpoint}`);
     const resp = await axios.post(endpoint, body, {
       headers: { 'x-acs-dingtalk-access-token': token, 'Content-Type': 'application/json' },
       timeout: 10_000,
     });
 
     if (resp.data?.processQueryKey) {
-      log?.info?.(`[DingTalk][Video][Proactive] 视频消息发送成功: ${fileName}`);
+      log?.info?.(`[DingTalk][Video][Proactive] 视频消息发送成功`);
     } else {
       log?.warn?.(`[DingTalk][Video][Proactive] 视频消息发送响应异常: ${JSON.stringify(resp.data)}`);
     }
   } catch (err: any) {
-    log?.error?.(`[DingTalk][Video][Proactive] 发送视频消息失败: ${fileName}, 错误: ${err.message}`);
+    log?.error?.(`[DingTalk][Video][Proactive] 发送视频消息失败, 错误: ${err.message}`);
   }
 }
 
@@ -713,7 +759,7 @@ async function sendAudioMessage(
 /**
  * 发送音频消息（主动 API 模式）
  */
-async function sendAudioProactive(
+export async function sendAudioProactive(
   config: DingtalkConfig,
   target: any,
   fileName: string,
@@ -809,7 +855,7 @@ async function sendFileMessage(
 /**
  * 发送文件消息（主动 API 模式）
  */
-async function sendFileProactive(
+export async function sendFileProactive(
   config: DingtalkConfig,
   target: any,
   fileInfo: FileInfo,
@@ -856,4 +902,134 @@ async function sendFileProactive(
   } catch (err: any) {
     log?.error?.(`[DingTalk][File][Proactive] 发送文件消息失败: ${fileInfo.fileName}, 错误: ${err.message}`);
   }
+}
+
+// ============================================================================
+// 裸露文件路径处理（绕过 OpenClaw SDK bug）
+// ============================================================================
+
+/**
+ * 检测并处理响应中的裸露本地文件路径
+ * 
+ * OpenClaw SDK 会自动检测响应中的裸露文件路径并调用 ctx.outbound.sendMedia，
+ * 但是 SDK 传递了错误的 to 参数（accountId 而不是真实的用户 ID）。
+ * 
+ * 为了绕过这个 bug，我们在 SDK 检测到之前就处理这些文件路径：
+ * 1. 检测裸露的本地文件路径（如 /Users/xxx/video.mp4）
+ * 2. 上传文件到钉钉
+ * 3. 发送媒体消息
+ * 4. 从响应中移除文件路径
+ * 
+ * 这样 SDK 就检测不到文件路径，也就不会调用 sendMedia 了。
+ */
+export async function processRawMediaPaths(
+  content: string,
+  config: DingtalkConfig,
+  oapiToken: string,
+  log?: any,
+  target?: AICardTarget,
+): Promise<string> {
+  const logPrefix = '[DingTalk][RawMedia]';
+  
+  // 匹配裸露的本地文件路径（绝对路径）
+  // 支持的格式：
+  // - Unix: /path/to/file.ext
+  // - Windows: C:\path\to\file.ext 或 C:/path/to/file.ext
+  const rawPathPattern = /(?:^|\s)((?:[A-Za-z]:)?[\/\\](?:[^\/\\:\*\?"<>\|\s]+[\/\\])*[^\/\\:\*\?"<>\|\s]+\.(?:mp4|avi|mov|wmv|flv|mkv|webm|mp3|wav|flac|aac|ogg|m4a|wma|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|rar|7z|tar|gz))(?:\s|$)/gi;
+  
+  const matches = Array.from(content.matchAll(rawPathPattern));
+  
+  if (matches.length === 0) {
+    return content;
+  }
+  
+  log?.info?.(`${logPrefix} 检测到 ${matches.length} 个裸露的本地文件路径`);
+  
+  let processedContent = content;
+  const statusMessages: string[] = [];
+  
+  for (const match of matches) {
+    const fullMatch = match[0];
+    const filePath = match[1].trim();
+    
+    try {
+      log?.info?.(`${logPrefix} 开始处理文件: ${filePath}`);
+      
+      // 判断文件类型
+      const ext = filePath.toLowerCase().split('.').pop() || '';
+      let mediaType: 'video' | 'audio' | 'file';
+      
+      if (['mp4', 'avi', 'mov', 'wmv', 'flv', 'mkv', 'webm'].includes(ext)) {
+        mediaType = 'video';
+      } else if (['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma'].includes(ext)) {
+        mediaType = 'audio';
+      } else {
+        mediaType = 'file';
+      }
+      
+      // 上传文件到钉钉
+      const mediaId = await uploadMediaToDingTalk(
+        config,
+        filePath,
+        mediaType,
+        oapiToken,
+        log
+      );
+      
+      if (!mediaId) {
+        log?.error?.(`${logPrefix} 文件上传失败: ${filePath}`);
+        statusMessages.push(`⚠️ 文件上传失败: ${filePath}`);
+        continue;
+      }
+      
+      // 发送媒体消息
+      const fileName = filePath.split(/[\/\\]/).pop() || 'unknown';
+      
+      if (mediaType === 'video') {
+        // 提取视频元数据
+        const metadata = await extractVideoMetadata(filePath, log);
+        
+        if (target) {
+          await sendVideoProactive(config, target, mediaId, fileName, log, metadata);
+        }
+        statusMessages.push(`✅ 视频已发送: ${fileName}`);
+      } else if (mediaType === 'audio') {
+        // 提取音频时长
+        const durationMs = await extractAudioDuration(filePath, log);
+        
+        if (target) {
+          await sendAudioProactive(config, target, fileName, mediaId, log, durationMs ?? undefined);
+        }
+        statusMessages.push(`✅ 音频已发送: ${fileName}`);
+      } else {
+        // 文件消息
+        const fileInfo: FileInfo = {
+          path: filePath,
+          fileName: fileName,
+          fileType: ext,
+        };
+        
+        if (target) {
+          await sendFileProactive(config, target, fileInfo, mediaId, log);
+        }
+        statusMessages.push(`✅ 文件已发送: ${fileName}`);
+      }
+      
+      // 从响应中移除文件路径
+      processedContent = processedContent.replace(fullMatch, fullMatch.replace(filePath, ''));
+      
+      log?.info?.(`${logPrefix} 文件处理完成: ${fileName}`);
+    } catch (err: any) {
+      log?.error?.(`${logPrefix} 处理文件失败: ${filePath}, 错误: ${err.message}`);
+      statusMessages.push(`⚠️ 处理失败: ${filePath}`);
+    }
+  }
+  
+  // 添加状态消息到响应中
+  if (statusMessages.length > 0) {
+    const statusText = '\n\n' + statusMessages.join('\n');
+    processedContent = processedContent.trim() + statusText;
+  }
+  
+  return processedContent;
 }

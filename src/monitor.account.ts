@@ -314,7 +314,8 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
   if (isDirect) {
     const dmPolicy = config.dmPolicy || 'open';
     const allowFrom: string[] = config.allowFrom || [];
-    if (dmPolicy === 'allowlist' && allowFrom.length > 0 && !allowFrom.includes(senderId)) {
+    // 安全检查：确保 senderId 存在且为字符串
+    if (dmPolicy === 'allowlist' && allowFrom.length > 0 && senderId && typeof senderId === 'string' && !allowFrom.includes(senderId)) {
       log?.warn?.(`[DingTalk] DM 被拦截: senderId=${senderId} 不在 allowFrom 白名单中`);
       return;
     }
@@ -415,34 +416,38 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
     const localPath = await downloadFileByCode(code, fileName, config, log);
 
     if (!localPath) {
-      fileContentParts.push(`[文件下载失败: ${fileName}]`);
+      fileContentParts.push(`⚠️ 文件下载失败: ${fileName}`);
       continue;
     }
 
-    // 视频文件：仅下载保存，不提取内容
+    // 构建 file:// 链接
+    const fileUri = `file://${localPath}`;
+
+    // 视频文件：下载后展示本地链接
     if (VIDEO_EXTENSIONS.has(ext) || content.messageType === 'video') {
-      fileContentParts.push(`[视频已保存: ${localPath}]`);
+      fileContentParts.push(`🎬 **视频**: ${fileName}\n🔗 [点击查看](${fileUri})`);
       log?.info?.(`[DingTalk][Video] 视频文件已下载: ${fileName} -> ${localPath}`);
       continue;
     }
 
-    // 音频文件：仅下载保存，不提取内容
+    // 音频文件：下载后展示本地链接
     if (AUDIO_EXTENSIONS.has(ext) || content.messageType === 'audio') {
-      const recognitionText = content.text && content.text !== '[语音消息]' ? `\n语音识别: ${content.text}` : '';
-      fileContentParts.push(`[音频已保存: ${localPath}${recognitionText}]`);
+      const recognitionText = content.text && content.text !== '[语音消息]' ? `\n📝 语音识别: ${content.text}` : '';
+      fileContentParts.push(`🎤 **音频**: ${fileName}${recognitionText}\n🔗 [点击查看](${fileUri})`);
       log?.info?.(`[DingTalk][Audio] 音频文件已下载: ${fileName} -> ${localPath}`);
       continue;
     }
 
+    // 文本文件：提取内容并提供本地链接
     if (TEXT_FILE_EXTENSIONS.has(ext)) {
       try {
         const fileContent = fs.readFileSync(localPath, 'utf-8');
         const maxLen = 50_000;
         const truncated = fileContent.length > maxLen ? fileContent.slice(0, maxLen) + '\n...(内容过长，已截断)' : fileContent;
-        fileContentParts.push(`[文件: ${fileName}]\n\`\`\`\n${truncated}\n\`\`\``);
+        fileContentParts.push(`📝 **文本文件**: ${fileName}\n🔗 [点击查看](${fileUri})\n\n\`\`\`\n${truncated}\n\`\`\``);
       } catch (err: any) {
         log?.error?.(`[DingTalk][File] 读取文本文件失败: ${err.message}`);
-        fileContentParts.push(`[文件已保存: ${localPath}，但读取内容失败]`);
+        fileContentParts.push(`📝 **文本文件**: ${fileName}\n🔗 [点击查看](${fileUri})\n⚠️ 读取内容失败`);
       }
     } else if (ext === '.docx') {
       try {
@@ -451,10 +456,10 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
         const fileContent = result.value;
         const maxLen = 50_000;
         const truncated = fileContent.length > maxLen ? fileContent.slice(0, maxLen) + '\n...(内容过长，已截断)' : fileContent;
-        fileContentParts.push(`[文件: ${fileName}]\n\`\`\`\n${truncated}\n\`\`\``);
+        fileContentParts.push(`📄 **Word 文档**: ${fileName}\n🔗 [点击查看](${fileUri})\n\n\`\`\`\n${truncated}\n\`\`\``);
       } catch (err: any) {
         log?.error?.(`[DingTalk][File] Word 文档文本提取失败: ${err.message}`);
-        fileContentParts.push(`[文件已保存: ${localPath}，但提取文本失败]`);
+        fileContentParts.push(`📄 **Word 文档**: ${fileName}\n🔗 [点击查看](${fileUri})\n⚠️ 提取文本失败`);
       }
     } else if (ext === '.pdf') {
       try {
@@ -464,13 +469,27 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
         const fileContent = pdfData.text;
         const maxLen = 50_000;
         const truncated = fileContent.length > maxLen ? fileContent.slice(0, maxLen) + '\n...(内容过长，已截断)' : fileContent;
-        fileContentParts.push(`[文件: ${fileName}]\n\`\`\`\n${truncated}\n\`\`\``);
+        fileContentParts.push(`📕 **PDF 文档**: ${fileName}\n🔗 [点击查看](${fileUri})\n\n\`\`\`\n${truncated}\n\`\`\``);
       } catch (err: any) {
         log?.error?.(`[DingTalk][File] PDF 文档文本提取失败: ${err.message}`);
-        fileContentParts.push(`[文件已保存: ${localPath}，但提取文本失败]`);
+        fileContentParts.push(`📕 **PDF 文档**: ${fileName}\n🔗 [点击查看](${fileUri})\n⚠️ 提取文本失败`);
       }
     } else {
-      fileContentParts.push(`[文件已保存: ${localPath}，请基于文件名和上下文回答]`);
+      // 其他文件类型：提供本地链接
+      let fileType = '文件';
+      // 安全检查：确保 ext 存在且为字符串
+      if (ext && typeof ext === 'string') {
+        if (['.xlsx', '.xls'].includes(ext)) {
+          fileType = 'Excel 表格';
+        } else if (['.pptx', '.ppt'].includes(ext)) {
+          fileType = 'PPT 演示文稿';
+        } else if (['.zip', '.rar', '.7z', '.tar', '.gz'].includes(ext)) {
+          fileType = '压缩包';
+        } else if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'].includes(ext)) {
+          fileType = '图片';
+        }
+      }
+      fileContentParts.push(`📎 **${fileType}**: ${fileName}\n🔗 [点击查看](${fileUri})`);
     }
   }
 
@@ -587,13 +606,17 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
     // 构建 inbound context，使用解析后的 sessionKey
     console.log(`[DingTalk][${accountId}] 开始构建 inbound context...`);
     
+    // ✅ 计算正确的 To 字段
+    const toField = isDirect ? senderId : data.conversationId;
+    console.log(`[DingTalk][${accountId}] 构建 inbound context: isDirect=${isDirect}, senderId=${senderId}, conversationId=${data.conversationId}, To=${toField}`);
+    
     const ctxPayload = core.channel.reply.finalizeInboundContext({
       Body: body,
       BodyForAgent: finalContent,
       RawBody: userContent,
       CommandBody: userContent,
       From: senderId,
-      To: accountId,
+      To: toField,  // ✅ 修复：单聊用 senderId，群聊用 conversationId
       SessionKey: sessionKey,  // ✅ 使用手动匹配的 sessionKey
       AccountId: accountId,
       ChatType: chatType,
@@ -606,7 +629,7 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
       Timestamp: Date.now(),
       CommandAuthorized: true,
       OriginatingChannel: "dingtalk" as const,
-      OriginatingTo: accountId,
+      OriginatingTo: toField,  // ✅ 修复：应该使用 toField，而不是 accountId
     });
 
     // 创建 reply dispatcher，使用解析后的 agentId
@@ -672,13 +695,14 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
             ? { type: 'user', userId: senderId }
             : { type: 'group', openConversationId: data.conversationId };
           
+          // ✅ 处理 Markdown 标记格式的媒体文件
           finalText = await processVideoMarkers(
             finalText,
             '',
             config,
             oapiToken,
             log,
-            true,
+            true,  // ✅ 使用主动 API 模式
             mediaTarget
           );
           finalText = await processAudioMarkers(
@@ -687,7 +711,7 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
             config,
             oapiToken,
             log,
-            true,
+            true,  // ✅ 使用主动 API 模式
             mediaTarget
           );
           finalText = await processFileMarkers(
@@ -696,7 +720,17 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
             config,
             oapiToken,
             log,
-            true,
+            true,  // ✅ 使用主动 API 模式
+            mediaTarget
+          );
+          
+          // ✅ 处理裸露的本地文件路径（绕过 OpenClaw SDK 的 bug）
+          const { processRawMediaPaths } = await import('./media.js');
+          finalText = await processRawMediaPaths(
+            finalText,
+            config,
+            oapiToken,
+            log,
             mediaTarget
           );
         }

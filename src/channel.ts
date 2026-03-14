@@ -73,7 +73,7 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
     chatTypes: ["direct", "group"],
     polls: false,
     threads: false,
-    media: true,
+    media: true,  // ✅ 启用媒体支持
     reactions: false,
     edit: false,
     reply: false,
@@ -415,7 +415,31 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
       };
     },
     sendMedia: async ({ cfg, to, text, mediaUrl, accountId, mediaLocalRoots, replyToId, threadId }) => {
+      console.log('[channel.ts][sendMedia] 开始处理，参数:', JSON.stringify({
+        to,
+        text,
+        mediaUrl,
+        accountId,
+        replyToId,
+        threadId,
+        toType: typeof to,
+        mediaUrlType: typeof mediaUrl,
+      }));
+      
+      // 参数校验
+      if (!to || typeof to !== 'string') {
+        console.error('[channel.ts][sendMedia] to 参数无效:', to);
+        throw new Error(`Invalid 'to' parameter: ${to}`);
+      }
+      
+      if (!mediaUrl || typeof mediaUrl !== 'string') {
+        console.error('[channel.ts][sendMedia] mediaUrl 参数无效:', mediaUrl);
+        throw new Error(`Invalid 'mediaUrl' parameter: ${mediaUrl}`);
+      }
+      
       const account = resolveDingtalkAccount({ cfg, accountId });
+      console.log('[channel.ts][sendMedia] account 解析完成，准备调用 sendMediaToDingTalk');
+      
       const result = await sendMediaToDingTalk({
         config: account.config,
         target: to,
@@ -423,6 +447,14 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
         mediaUrl,
         replyToId,
       });
+      
+      console.log('[channel.ts][sendMedia] sendMediaToDingTalk 返回结果:', JSON.stringify({
+        ok: result.ok,
+        error: result.error,
+        hasProcessQueryKey: !!result.processQueryKey,
+        hasCardInstanceId: !!result.cardInstanceId,
+      }));
+      
       return {
         channel: "dingtalk-connector",
         messageId: result.processQueryKey ?? result.cardInstanceId ?? "unknown",

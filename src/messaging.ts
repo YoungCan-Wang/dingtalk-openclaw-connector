@@ -6,7 +6,7 @@
 import axios from 'axios';
 import type { DingtalkConfig } from './types.ts';
 import { DINGTALK_API, getAccessToken, getOapiAccessToken } from './utils.ts';
-import { processLocalImages, processVideoMarkers, processAudioMarkers, processFileMarkers } from './media.ts';
+import { processLocalImages, processVideoMarkers, processAudioMarkers, processFileMarkers, uploadMediaToDingTalk } from './media.ts';
 
 // ============ 常量 ============
 
@@ -73,7 +73,7 @@ function ensureTableBlankLines(text: string): string {
   // 匹配包含竖线的表格行
   const tableRowRegex = /^\s*\|?.*\|.*\|?\s*$/;
 
-  const isDivider = (line: string) => line.includes('|') && tableDividerRegex.test(line);
+  const isDivider = (line: string) => line && typeof line === 'string' && line.includes('|') && tableDividerRegex.test(line);
 
   for (let i = 0; i < lines.length; i++) {
     const currentLine = lines[i];
@@ -334,7 +334,7 @@ export async function sendMessage(
   text: string,
   options: any = {},
 ): Promise<any> {
-  const hasMarkdown = /^[#*>-]|[*_`#\[\]]/.test(text) || text.includes('\n');
+  const hasMarkdown = /^[#*>-]|[*_`#\[\]]/.test(text) || (text && typeof text === 'string' && text.includes('\n'));
   const useMarkdown = options.useMarkdown !== false && (options.useMarkdown || hasMarkdown);
 
   if (useMarkdown) {
@@ -625,19 +625,24 @@ export async function sendTextToDingTalk(params: {
 }): Promise<SendResult> {
   const { config, target, text, replyToId } = params;
   
+  // 参数校验
+  if (!target || typeof target !== 'string') {
+    console.error('[sendTextToDingTalk] target 参数无效:', target);
+    return { ok: false, error: 'Invalid target parameter', usedAICard: false };
+  }
+  
   // 判断目标是用户还是群
   const isUser = !target.startsWith('cid');
   const targetParam = isUser
     ? { type: 'user' as const, userId: target }
     : { type: 'group' as const, openConversationId: target };
 
-  return sendProactive({
+  return sendProactive(
     config,
-    target: targetParam,
+    targetParam,
     text,
-    msgType: 'text',
-    replyToId,
-  });
+    { msgType: 'text', replyToId }
+  );
 }
 
 /**
@@ -650,7 +655,21 @@ export async function sendMediaToDingTalk(params: {
   mediaUrl: string;
   replyToId?: string;
 }): Promise<SendResult> {
+  console.log('[sendMediaToDingTalk] 开始处理，params:', JSON.stringify({
+    target: params.target,
+    text: params.text,
+    mediaUrl: params.mediaUrl,
+    replyToId: params.replyToId,
+    hasConfig: !!params.config,
+  }));
+  
   const { config, target, text, mediaUrl, replyToId } = params;
+  
+  // 参数校验
+  if (!target || typeof target !== 'string') {
+    console.error('[sendMediaToDingTalk] target 参数无效:', target);
+    return { ok: false, error: 'Invalid target parameter', usedAICard: false };
+  }
   
   // 判断目标是用户还是群
   const isUser = !target.startsWith('cid');
@@ -658,16 +677,129 @@ export async function sendMediaToDingTalk(params: {
     ? { type: 'user' as const, userId: target }
     : { type: 'group' as const, openConversationId: target };
 
-  // 如果有媒体 URL，先上传到钉钉
-  const uploadedMedia = await uploadMediaToDingTalk(config, mediaUrl);
-  
-  return sendProactive({
-    config,
-    target: targetParam,
-    text: text ?? '已发送媒体文件',
-    msgType: 'text',
-    replyToId,
-  });
+  console.log('[sendMediaToDingTalk] 参数解析完成，mediaUrl:', mediaUrl, 'type:', typeof mediaUrl);
+
+  // 参数校验
+  if (!mediaUrl) {
+    console.log('[sendMediaToDingTalk] mediaUrl 为空，返回错误提示');
+    return sendProactive(
+      config,
+      targetParam,
+      text ?? '⚠️ 缺少媒体文件 URL',
+      { msgType: 'text', replyToId }
+    );
+  }
+
+  // 1. 先发送文本消息（如果有）
+  if (text?.trim()) {
+    console.log('[sendMediaToDingTalk] 先发送文本消息');
+    await sendProactive(
+      config,
+      targetParam,
+      text,
+      { msgType: 'text', replyToId }
+    );
+  }
+
+  // 2. 上传媒体文件并发送媒体消息
+  try {
+    console.log('[sendMediaToDingTalk] 开始获取 oapiToken');
+    const oapiToken = await getOapiAccessToken(config);
+    console.log('[sendMediaToDingTalk] oapiToken 获取成功');
+    
+    // 根据文件扩展名判断媒体类型
+    console.log('[sendMediaToDingTalk] 开始解析文件扩展名，mediaUrl:', mediaUrl);
+    const ext = mediaUrl.toLowerCase().split('.').pop() || '';
+    console.log('[sendMediaToDingTalk] 文件扩展名:', ext);
+    let mediaType: 'image' | 'file' | 'video' | 'voice' = 'file';
+    
+    if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'].includes(ext)) {
+      mediaType = 'image';
+    } else if (['mp4', 'avi', 'mov', 'mkv', 'flv', 'wmv', 'webm'].includes(ext)) {
+      mediaType = 'video';
+    } else if (['mp3', 'wav', 'aac', 'ogg', 'm4a', 'flac', 'wma', 'amr'].includes(ext)) {
+      mediaType = 'voice';
+    }
+    console.log('[sendMediaToDingTalk] 媒体类型判断完成:', mediaType);
+    
+    // 上传文件到钉钉
+    const uploadResult = await uploadMediaToDingTalk(mediaUrl, mediaType, oapiToken, 20 * 1024 * 1024);
+    
+    if (!uploadResult) {
+      // 上传失败，发送文本消息提示
+      return sendProactive(
+        config,
+        targetParam,
+        '⚠️ 媒体文件上传失败',
+        { msgType: 'text', replyToId }
+      );
+    }
+    
+    // uploadResult 现在是下载链接，需要提取 media_id
+    // 格式：https://down.dingtalk.com/media/{media_id}
+    const mediaId = uploadResult.replace('https://down.dingtalk.com/media/', '');
+    console.log('[sendMediaToDingTalk] 提取 media_id:', mediaId);
+    
+    // 3. 根据媒体类型发送对应的消息
+    const fileName = mediaUrl.split('/').pop() || 'file';
+    
+    if (mediaType === 'image') {
+      // 图片消息 - 使用 markdown 格式
+      return sendProactive(
+        config,
+        targetParam,
+        `![image](${mediaId})`,
+        { msgType: 'markdown', replyToId }
+      );
+    }
+    
+    // 统一处理所有媒体类型，发送包含下载链接的文本消息
+    const fs = await import('fs');
+    const stats = fs.statSync(mediaUrl);
+    const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+    
+    // 构建下载链接（添加文件扩展名）
+    const downloadUrl = `${uploadResult}.${ext}`;
+    
+    // 根据媒体类型选择图标和描述
+    let icon = '📄';
+    let typeLabel = '文件';
+    if (mediaType === 'video') {
+      icon = '📹';
+      typeLabel = '视频';
+    } else if (mediaType === 'voice') {
+      icon = '🎵';
+      typeLabel = '音频';
+    } else if (mediaType === 'image') {
+      icon = '🖼️';
+      typeLabel = '图片';
+    }
+    
+    const message = `${icon} ${typeLabel}文件已上传\n\n文件: ${fileName}\n大小: ${fileSizeMB} MB\n\n下载链接: ${downloadUrl}`;
+    
+    const result = await sendProactive(
+      config,
+      targetParam,
+      message,
+      { msgType: 'text', replyToId }
+    );
+    
+    // 确保返回值中有 processQueryKey，告诉 SDK 消息已发送成功
+    return {
+      ...result,
+      processQueryKey: result.processQueryKey || 'media-message-sent',
+    };
+    
+  } catch (err: any) {
+    console.error('[sendMediaToDingTalk] 发送媒体消息失败:', err.message);
+    // 发生错误，发送文本消息提示
+    return sendProactive(
+      config,
+      targetParam,
+      `⚠️ 媒体文件处理失败: ${err.message}`,
+      { msgType: 'text', replyToId }
+    );
+  }
 }
 
 /**
@@ -679,8 +811,14 @@ export async function sendProactive(
   content: string,
   options: ProactiveSendOptions = {},
 ): Promise<SendResult> {
+  console.log('[sendProactive] 开始处理，参数:', JSON.stringify({
+    target,
+    contentLength: content?.length,
+    hasOptions: !!options,
+  }));
+  
   if (!options.msgType) {
-    const hasMarkdown = /^[#*>-]|[*_`#\[\]]/.test(content) || content.includes('\n');
+    const hasMarkdown = /^[#*>-]|[*_`#\[\]]/.test(content) || (content && typeof content === 'string' && content.includes('\n'));
     if (hasMarkdown) {
       options.msgType = 'markdown';
     }
@@ -690,15 +828,18 @@ export async function sendProactive(
   if (target.userId || target.userIds) {
     const userIds = target.userIds || [target.userId!];
     const userId = userIds[0];
+    console.log('[sendProactive] 发送给用户，userId:', userId);
     
     // 构建发送参数
     return sendProactiveInternal(config, { type: 'user', userId }, content, options);
   }
 
   if (target.openConversationId) {
+    console.log('[sendProactive] 发送给群聊，openConversationId:', target.openConversationId);
     return sendProactiveInternal(config, { type: 'group', openConversationId: target.openConversationId }, content, options);
   }
 
+  console.error('[sendProactive] target 参数缺少必要字段:', target);
   return { ok: false, error: 'Must specify userId, userIds, or openConversationId', usedAICard: false };
 }
 
@@ -711,6 +852,21 @@ async function sendProactiveInternal(
   content: string,
   options: ProactiveSendOptions,
 ): Promise<SendResult> {
+  console.log('[sendProactiveInternal] 开始处理，参数:', JSON.stringify({
+    target,
+    contentLength: content?.length,
+    msgType: options.msgType,
+    useAICard: options.useAICard,
+    targetType: target?.type,
+    hasTarget: !!target,
+  }));
+  
+  // 参数校验
+  if (!target || typeof target !== 'object') {
+    console.error('[sendProactiveInternal] target 参数无效:', target);
+    return { ok: false, error: 'Invalid target parameter', usedAICard: false };
+  }
+  
   const { msgType = 'text', useAICard = false, fallbackToNormal = false, log } = options;
   
   // 如果启用 AI Card
@@ -734,9 +890,12 @@ async function sendProactiveInternal(
   
   // 发送普通消息
   try {
+    console.log('[sendProactiveInternal] 准备发送普通消息，target.type:', target.type);
     const token = await getAccessToken(config);
     const isUser = target.type === 'user';
+    console.log('[sendProactiveInternal] isUser:', isUser, 'target:', JSON.stringify(target));
     const targetId = isUser ? target.userId : target.openConversationId;
+    console.log('[sendProactiveInternal] targetId:', targetId);
     
     // 构建 webhook URL
     const webhookUrl = `${DINGTALK_API}/v1.0/robot/oToMessages/batchSend`;

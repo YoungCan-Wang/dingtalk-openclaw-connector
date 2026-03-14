@@ -187,22 +187,25 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
         debug: params.runtime.debug,
       };
       
+      // ✅ 构建正确的 target（单聊用 senderId，群聊用 conversationId）
+      const target: AICardTarget = isDirect
+        ? { type: 'user', userId: senderId }
+        : { type: 'group', openConversationId: conversationId };
+      
+      logger?.info?.(`[DingTalk][closeStreaming] 开始处理媒体文件，target=${JSON.stringify(target)}`);
+      
       if (oapiToken) {
         // 处理本地图片
         finalText = await processLocalImages(finalText, oapiToken, logger);
         
-        // 处理视频、音频、文件标记
-        const target: AICardTarget = isDirect
-          ? { type: 'user', userId: senderId }
-          : { type: 'group', openConversationId: conversationId };
-        
+        // ✅ 先处理 Markdown 标记格式的媒体文件
         finalText = await processVideoMarkers(
           finalText,
           '',
           account.config as DingtalkConfig,
           oapiToken,
           logger,
-          false,
+          true,  // ✅ 使用主动 API 模式
           target
         );
         finalText = await processAudioMarkers(
@@ -211,7 +214,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
           account.config as DingtalkConfig,
           oapiToken,
           logger,
-          false,
+          true,  // ✅ 使用主动 API 模式
           target
         );
         finalText = await processFileMarkers(
@@ -220,9 +223,23 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
           account.config as DingtalkConfig,
           oapiToken,
           logger,
-          false,
+          true,  // ✅ 使用主动 API 模式
           target
         );
+        
+        // ✅ 处理裸露的本地文件路径（绕过 OpenClaw SDK 的 bug）
+        logger?.info?.(`[DingTalk][closeStreaming] 准备调用 processRawMediaPaths`);
+        const { processRawMediaPaths } = await import('./media.js');
+        finalText = await processRawMediaPaths(
+          finalText,
+          account.config as DingtalkConfig,
+          oapiToken,
+          logger,
+          target
+        );
+        logger?.info?.(`[DingTalk][closeStreaming] processRawMediaPaths 处理完成`);
+      } else {
+        logger?.warn?.(`[DingTalk][closeStreaming] oapiToken 为空，跳过媒体处理`);
       }
 
       await finishAICard(
@@ -249,10 +266,46 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
         if (streamingEnabled) {
           await startStreaming();
         }
-        void typingCallbacks.onReplyStart?.();
+        typingCallbacks.onActive?.();
       },
-      deliver: async (payload: ReplyPayload, info) => {
-        const text = payload.text ?? "";
+      deliver: async (payload, info) => {
+        let text = payload.text ?? "";
+        
+        // ✅ 添加日志追踪
+        params.runtime.info?.(`[DingTalk][deliver] 被调用: kind=${info?.kind}, textLength=${text.length}, hasText=${Boolean(text.trim())}`);
+        
+        // ✅ 在 final 响应时，先处理裸露的文件路径
+        if (info?.kind === "final" && text.trim()) {
+          const logger = {
+            info: params.runtime.info,
+            error: params.runtime.error,
+            warn: params.runtime.warn,
+            debug: params.runtime.debug,
+          };
+          
+          const target: AICardTarget = isDirect
+            ? { type: 'user', userId: senderId }
+            : { type: 'group', openConversationId: conversationId };
+          
+          try {
+            const oapiToken = await getOapiAccessToken(account.config as DingtalkConfig);
+            if (oapiToken) {
+              logger?.info?.(`[DingTalk][deliver] 检测到 final 响应，准备处理裸露文件路径`);
+              const { processRawMediaPaths } = await import('./media.js');
+              text = await processRawMediaPaths(
+                text,
+                account.config as DingtalkConfig,
+                oapiToken,
+                logger,
+                target
+              );
+              logger?.info?.(`[DingTalk][deliver] 裸露文件路径处理完成`);
+            }
+          } catch (err: any) {
+            logger?.error?.(`[DingTalk][deliver] 处理裸露文件路径失败: ${err.message}`);
+          }
+        }
+        
         const hasText = Boolean(text.trim());
         const skipTextForDuplicateFinal =
           info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
@@ -410,8 +463,11 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
               );
               lastUpdateTime = now;
             } catch (err: any) {
-              if (err.response?.status === 403 && err.response?.data?.code?.includes('QpsLimit')) {
+              // 安全检查：确保 code 存在且为字符串
+              const errorCode = err.response?.data?.code;
+              if (err.response?.status === 403 && typeof errorCode === 'string' && errorCode.includes('QpsLimit')) {
                 // QPS 限流，跳过本次更新
+                logger?.warn?.(`[DingTalk][AICard] QPS 限流，跳过本次更新`);
               } else {
                 throw err;
               }
