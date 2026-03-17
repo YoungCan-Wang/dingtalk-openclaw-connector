@@ -3,18 +3,18 @@
  * 
  * 职责：
  * - 管理单个钉钉账号的 WebSocket 连接
- * - 实现应用层心跳检测（30 秒间隔，90 秒超时）
- * - 处理连接重连逻辑，避免与 SDK 的双重 重连冲突
- * - 进程锁机制，防止多个进程同时监控同一账号
+ * - 实现应用层心跳检测（10 秒间隔，90 秒超时）
+ * - 处理连接重连逻辑，带指数退避
  * - 消息去重（内置 Map，5 分钟 TTL）
  * 
  * 核心特性：
- * - 关闭 SDK 内置 keepAlive，使用自定义温和心跳
+ * - 关闭 SDK 内置 keepAlive，使用自定义心跳
  * - 详细的消息接收日志（三阶段：接收、解析、处理）
  * - 连接统计和监控（每分钟输出）
  */
 import type { ClawdbotConfig, RuntimeEnv } from "openclaw/plugin-sdk";
 import type { ResolvedDingtalkAccount } from "./types";
+import type { DWClient } from 'dingtalk-stream';
 
 // ============ 消息去重（内置，避免循环依赖） ============
 
@@ -79,6 +79,17 @@ export type MessageHandler = (params: {
   cfg: ClawdbotConfig;
 }) => Promise<void>;
 
+// ============ 连接配置 ============
+
+/** 心跳间隔（毫秒） */
+const HEARTBEAT_INTERVAL = 10 * 1000;  // 10 秒
+/** 超时阈值（毫秒） */
+const TIMEOUT_THRESHOLD = 90 * 1000;    // 90 秒
+/** 基础退避时间（毫秒） */
+const BASE_BACKOFF_DELAY = 1000;        // 1 秒
+/** 最大退避时间（毫秒） */
+const MAX_BACKOFF_DELAY = 30 * 1000;    // 30 秒
+
 // ============ 监控账号 ============
 
 export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Promise<void> {
@@ -128,26 +139,206 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
     throw new Error('Failed to import DWClient from dingtalk-stream module');
   }
 
-  // 配置 DWClient：启用 SDK 内置的 keepAlive 和 autoReconnect
-  // - keepAlive: true（启用 SDK 的心跳检测，8 秒间隔，自动检测连接状态）
-  // - autoReconnect: true（SDK 在 close 事件时自动重连）
-  // - endpoint: 可选的自定义网关地址（优先级：account 级别 > 外层）
-  // - debug: 可选的调试模式（优先级：account 级别 > 外层）
-  // - 移除应用层自定义心跳，避免与 SDK 冲突
+  // 配置 DWClient：禁用 SDK 内置的 keepAlive 和 autoReconnect，使用自定义实现
   const client = new DWClient({
     clientId: account.clientId,
     clientSecret: account.clientSecret,
-    debug: account.config.debug,  // ✅ 使用合并后的配置（account 优先级 > 外层）
-    endpoint: account.config.endpoint,  // ✅ 使用合并后的配置（account 优先级 > 外层）
-    autoReconnect: true,
-    keepAlive: true,  // ✅ 启用 SDK 心跳检测
+    debug: account.config.debug,
+    endpoint: account.config.endpoint,
+    autoReconnect: false,  // ❌ 禁用 SDK 自动重连
+    keepAlive: false,      // ❌ 禁用 SDK 心跳检测
   } as any);
+
+  // ============ 连接状态管理 ============
+  
+  let lastSocketAvailableTime = Date.now();
+  let isReconnecting = false;
+  let reconnectAttempts = 0;
+  let keepAliveTimer: NodeJS.Timeout | null = null;
+  let isStopped = false;
+
+  // ============ 辅助函数 ============
+
+  /** 计算指数退避延迟（带抖动） */
+  function calculateBackoffDelay(attempt: number): number {
+    const exponentialDelay = BASE_BACKOFF_DELAY * Math.pow(2, attempt);
+    const jitter = Math.random() * 1000;  // 0-1 秒随机抖动
+    return Math.min(exponentialDelay + jitter, MAX_BACKOFF_DELAY);
+  }
+
+  /** 统一重连函数，带指数退避（无限重连） */
+  async function doReconnect(immediate = false) {
+    if (isReconnecting || isStopped) {
+      log?.debug?.(`[${accountId}] 正在重连中或已停止，跳过`);
+      return;
+    }
+
+    isReconnecting = true;
+
+    // 应用指数退避（非立即重连时）
+    if (!immediate && reconnectAttempts > 0) {
+      const delay = calculateBackoffDelay(reconnectAttempts);
+      log?.info?.(`[${accountId}] ⏳ 等待 ${Math.round(delay / 1000)} 秒后重连 (尝试 ${reconnectAttempts + 1})`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+
+    try {
+      // 1. 先断开旧连接（检查 WebSocket 状态）
+      if (client.socket?.readyState === 1 || client.socket?.readyState === 3) {
+        await client.disconnect();
+        log?.info?.(`[${accountId}] 已断开旧连接`);
+      }
+
+      // 2. 重新建立连接
+      await client.connect();
+
+      // 3. 重置 socket 可用时间和重连计数
+      lastSocketAvailableTime = Date.now();
+      reconnectAttempts = 0;  // 重连成功，重置计数
+
+      log?.info?.(`[${accountId}] ✅ 重连成功`);
+    } catch (err: any) {
+      reconnectAttempts++;
+      log?.error?.(`[${accountId}] 重连失败：${err.message} (尝试 ${reconnectAttempts})`);
+      throw err;
+    } finally {
+      isReconnecting = false;
+    }
+  }
+
+  /** 监听 pong 响应（更新 socket 可用时间） */
+  function setupPongListener() {
+    client.socket?.on('pong', () => {
+      lastSocketAvailableTime = Date.now();
+      log?.debug?.(`[${accountId}] 收到 PONG 响应`);
+    });
+  }
+
+  /** 监听 WebSocket message 事件，收到 disconnect 消息时立即触发重连 */
+  function setupMessageListener() {
+    client.socket?.on('message', (data: any) => {
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === 'SYSTEM' && msg.headers?.topic === 'disconnect') {
+          if (!isStopped && !isReconnecting) {
+            // 立即重连，不退避
+            doReconnect(true).catch(err => {
+              log?.error?.(`[${accountId}] 重连失败：${err.message}`);
+            });
+          }
+        }
+      } catch (e) {
+        // 忽略解析错误
+      }
+    });
+  }
+
+  /** 监听 WebSocket close 事件，服务端主动断开时立即触发重连 */
+  function setupCloseListener() {
+    client.socket?.on('close', (code, reason) => {
+      log?.info?.(`[${accountId}] WebSocket close: code=${code}, reason=${reason || '未知'}, isStopped=${isStopped}`);
+
+      if (isStopped) {
+        return;
+      }
+
+      // 立即重连，不退避
+      setTimeout(() => {
+        doReconnect(true).catch(err => {
+          log?.error?.(`[${accountId}] 重连失败：${err.message}`);
+        });
+      }, 0);
+    });
+  }
+
+  /**
+   * 启动 keepAlive 机制（单定时器 + 指数退避）
+   *
+   * 业界最佳实践：
+   * - 单定时器：每 10 秒检查一次，同时完成心跳和超时检测
+   * - 使用 WebSocket 原生 Ping
+   * - 指数退避重连：避免雪崩效应
+   */
+  function startKeepAlive(): () => void {
+    log?.debug?.(`[${accountId}] 🚀 启动 keepAlive 定时器，间隔=${HEARTBEAT_INTERVAL / 1000}秒`);
+
+    keepAliveTimer = setInterval(async () => {
+      if (isStopped) {
+        if (keepAliveTimer) clearInterval(keepAliveTimer);
+        return;
+      }
+
+      try {
+        const elapsed = Date.now() - lastSocketAvailableTime;
+
+        // 【超时检测】超过 90 秒未确认 socket 可用，触发重连
+        if (elapsed > TIMEOUT_THRESHOLD) {
+          log?.info?.(`[${accountId}] ⚠️ 超时检测：已 ${Math.round(elapsed / 1000)} 秒未确认 socket 可用，触发重连...`);
+          await doReconnect();
+          return;
+        }
+
+        // 【心跳检测】检查 socket 状态
+        const socketState = client.socket?.readyState;
+        log?.debug?.(`[${accountId}] 🔍 心跳检测：socket 状态=${socketState}, elapsed=${Math.round(elapsed / 1000)}s`);
+
+        if (socketState !== 1) {
+          log?.info?.(`[${accountId}] ⚠️ 心跳检测：socket 状态=${socketState}，触发重连...`);
+          await doReconnect(true);  // 立即重连，不退避
+          return;
+        }
+
+        // 【发送原生 Ping】更新可用时间
+        try {
+          client.socket?.ping();
+          lastSocketAvailableTime = Date.now();
+          log?.debug?.(`[${accountId}] 💓 发送 PING 心跳成功`);
+        } catch (err: any) {
+          log?.warn?.(`[${accountId}] 发送 PING 失败：${err.message}`);
+          // 发送失败也计入超时
+        }
+      } catch (err: any) {
+        log?.error?.(`[${accountId}] keepAlive 检测失败：${err.message}`);
+      }
+    }, HEARTBEAT_INTERVAL);  // 每 10 秒检测一次
+
+    log?.debug?.(`[${accountId}] ✅ keepAlive 定时器已启动`);
+
+    // 返回清理函数
+    return () => {
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+      log?.debug?.(`[${accountId}] keepAlive 定时器已清理`);
+    };
+  }
+
+  /** 停止并清理所有资源 */
+  function stop() {
+    isStopped = true;
+    
+    // 清理定时器
+    if (keepAliveTimer) clearInterval(keepAliveTimer);
+    keepAliveTimer = null;
+
+    // 清理事件监听器
+    if (client.socket) {
+      client.socket.removeAllListeners();
+    }
+
+    log?.debug?.(`[${accountId}] Connection 已停止`);
+  }
+
+  // 初始化：设置所有事件监听器
+  setupPongListener();
+  setupMessageListener();
+  setupCloseListener();
 
   return new Promise<void>(async (resolve, reject) => {
     // Handle abort signal
     if (abortSignal) {
       const onAbort = async () => {
         log(`[DingTalk][${accountId}] Abort signal received, stopping...`);
+        stop();
         try {
           // 只在连接已建立时才断开
           if (client.socket && client.socket.readyState === 1) {
@@ -185,29 +376,29 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
       
       // ===== 第一步：记录原始消息接收 =====
       console.log(`\n========== [DingTalk][${accountId}] 收到新消息 ==========`);
-      console.log(`时间: ${timestamp}`);
+      console.log(`时间：${timestamp}`);
       console.log(`MessageId: ${messageId || 'N/A'}`);
       console.log(`Headers: ${JSON.stringify(res.headers || {})}`);
-      console.log(`Data 长度: ${res.data?.length || 0} 字符`);
+      console.log(`Data 长度：${res.data?.length || 0} 字符`);
 
       // 立即确认回调
       if (messageId) {
         client.socketCallBackResponse(messageId, { success: true });
-        console.log(`[DingTalk][${accountId}] ✅ 已立即确认回调: messageId=${messageId}`);
+        console.log(`[DingTalk][${accountId}] ✅ 已立即确认回调：messageId=${messageId}`);
       } else {
-        console.warn(`[DingTalk][${accountId}] ⚠️ 警告: 消息没有 messageId`);
+        console.warn(`[DingTalk][${accountId}] ⚠️ 警告：消息没有 messageId`);
       }
 
       // 消息去重
       if (messageId && isMessageProcessed(messageId)) {
-        console.warn(`[DingTalk][${accountId}] ⚠️ 检测到重复消息，跳过处理: messageId=${messageId}`);
+        console.warn(`[DingTalk][${accountId}] ⚠️ 检测到重复消息，跳过处理：messageId=${messageId}`);
         console.log(`========== 消息处理结束（重复） ==========\n`);
         return;
       }
 
       if (messageId) {
         markMessageProcessed(messageId);
-        console.log(`[DingTalk][${accountId}] 标记消息为已处理: messageId=${messageId}`);
+        console.log(`[DingTalk][${accountId}] 标记消息为已处理：messageId=${messageId}`);
       }
 
       // 异步处理消息
@@ -217,11 +408,11 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
         
         // ===== 第二步：记录解析后的消息详情 =====
         console.log(`\n----- 消息详情 -----`);
-        console.log(`消息类型: ${data.msgtype || 'unknown'}`);
-        console.log(`会话类型: ${data.conversationType === '1' ? 'DM (单聊)' : data.conversationType === '2' ? 'Group (群聊)' : data.conversationType}`);
-        console.log(`发送者: ${data.senderNick || 'unknown'} (${data.senderStaffId || data.senderId || 'unknown'})`);
-        console.log(`会话ID: ${data.conversationId || 'N/A'}`);
-        console.log(`消息ID: ${data.msgId || 'N/A'}`);
+        console.log(`消息类型：${data.msgtype || 'unknown'}`);
+        console.log(`会话类型：${data.conversationType === '1' ? 'DM (单聊)' : data.conversationType === '2' ? 'Group (群聊)' : data.conversationType}`);
+        console.log(`发送者：${data.senderNick || 'unknown'} (${data.senderStaffId || data.senderId || 'unknown'})`);
+        console.log(`会话 ID: ${data.conversationId || 'N/A'}`);
+        console.log(`消息 ID: ${data.msgId || 'N/A'}`);
         console.log(`SessionWebhook: ${data.sessionWebhook ? '已提供' : '未提供'}`);
         console.log(`RobotCode: ${data.robotCode || account.config?.clientId || 'N/A'}`);
         
@@ -234,8 +425,8 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
         } else if (data.content) {
           contentPreview = JSON.stringify(data.content).substring(0, 100) + '...';
         }
-        console.log(`消息内容预览: ${contentPreview}`);
-        console.log(`完整数据字段: ${Object.keys(data).join(', ')}`);
+        console.log(`消息内容预览：${contentPreview}`);
+        console.log(`完整数据字段：${Object.keys(data).join(', ')}`);
         console.log(`----- 消息详情结束 -----\n`);
         
         // ===== 第三步：开始处理消息 =====
@@ -260,8 +451,8 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
       } catch (error: any) {
         processedCount++;
         console.error(`\n[DingTalk][${accountId}] ❌ 处理消息异常 (${processedCount}/${receivedCount}):`);
-        console.error(`错误类型: ${error.name || 'Error'}`);
-        console.error(`错误信息: ${error.message}`);
+        console.error(`错误类型：${error.name || 'Error'}`);
+        console.error(`错误信息：${error.message}`);
         console.error(`错误堆栈:\n${error.stack}`);
         console.log(`========== 消息处理结束（失败） ==========\n`);
       }
@@ -270,6 +461,7 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
     // 清理定时器
     const cleanup = () => {
       clearInterval(statsInterval);
+      stop();
     };
 
     // Connect to DingTalk Stream
@@ -277,7 +469,23 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
       await client.connect();
       log(`[DingTalk][${accountId}] Connected to DingTalk Stream successfully`);
       log(`[DingTalk][${accountId}] PID: ${process.pid}`);
-      log(`[DingTalk][${accountId}] ✅ SDK keepAlive: true (8 秒心跳检测), autoReconnect: true`);
+      log(`[DingTalk][${accountId}] ✅ 自定义 keepAlive: true (10 秒心跳，90 秒超时), 指数退避重连`);
+      
+      // 启动自定义心跳检测
+      const cleanupKeepAlive = startKeepAlive();
+      
+      // 重写 cleanup 函数，包含 keepAlive 清理
+      const enhancedCleanup = () => {
+        cleanupKeepAlive();
+        clearInterval(statsInterval);
+        stop();
+      };
+
+      // 进程退出时清理
+      process.on('exit', enhancedCleanup);
+      process.on('SIGINT', enhancedCleanup);
+      process.on('SIGTERM', enhancedCleanup);
+      
     } catch (error: any) {
       cleanup(); // 连接失败时清理资源
       
@@ -298,17 +506,14 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
       );
     }
 
-    // Handle disconnection
-    client.on('close', () => {
-      log?.info?.(`[DingTalk][${accountId}] Connection closed, SDK will auto-reconnect...`);
-      log?.warn?.(`[DingTalk][${accountId}] ⚠️ 如果长时间无法重连，可能存在网络问题或长尾连接，建议重启进程`);
-    });
+    // Handle disconnection（已被自定义 close 监听器替代）
+    // client.on('close', ...) - 已移除，使用 setupCloseListener
 
     client.on('error', (err: Error) => {
       log?.error?.(`[DingTalk][${accountId}] Connection error: ${err.message}`);
     });
 
-    // 监听重连事件
+    // 监听重连事件（仅用于日志，实际重连由自定义逻辑处理）
     client.on('reconnect', () => {
       log?.info?.(`[DingTalk][${accountId}] SDK reconnecting...`);
     });
@@ -316,11 +521,6 @@ export async function monitorSingleAccount(opts: MonitorDingtalkAccountOpts): Pr
     client.on('reconnected', () => {
       log?.info?.(`[DingTalk][${accountId}] ✅ SDK reconnected successfully`);
     });
-
-    // 进程退出时清理
-    process.on('exit', cleanup);
-    process.on('SIGINT', cleanup);
-    process.on('SIGTERM', cleanup);
   });
 }
 
