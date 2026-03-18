@@ -130,6 +130,13 @@ export function resolveDingtalkCredentials(
   };
 
   const resolveSecretLike = (value: unknown, path: string): string | undefined => {
+    // Missing credential: treat as not configured (no exception).
+    // This path is used in non-onboarding contexts (e.g. channel listing/status),
+    // so we must not throw when credentials are absent.
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+
     const asString = normalizeString(value);
     if (asString) {
       return asString;
