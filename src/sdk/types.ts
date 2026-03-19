@@ -94,6 +94,7 @@ export interface DingtalkAccountConfig {
   requireMention?: boolean;
   groupSessionScope?: GroupSessionScope;
   separateSessionByConversation?: boolean;
+  sharedMemoryAcrossConversations?: boolean;
   historyLimit?: number;
   dmHistoryLimit?: number;
   textChunkLimit?: number;
@@ -119,6 +120,7 @@ export interface DingtalkConfig {
   requireMention?: boolean;
   groupSessionScope?: GroupSessionScope;
   separateSessionByConversation?: boolean;
+  sharedMemoryAcrossConversations?: boolean;
   historyLimit?: number;
   dmHistoryLimit?: number;
   textChunkLimit?: number;

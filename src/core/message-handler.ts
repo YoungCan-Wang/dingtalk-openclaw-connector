@@ -451,6 +451,7 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
     groupSubject: data.conversationTitle,
     separateSessionByConversation: config.separateSessionByConversation,
     groupSessionScope: config.groupSessionScope,
+    sharedMemoryAcrossConversations: config.sharedMemoryAcrossConversations,
   });
 
 

@@ -61,6 +61,7 @@ const DingtalkSharedConfigShape = {
   typingIndicator: z.boolean().optional(),
   resolveSenderNames: z.boolean().optional(),
   separateSessionByConversation: z.boolean().optional(),
+  sharedMemoryAcrossConversations: z.boolean().optional(),
   groupSessionScope: GroupSessionScopeSchema,
   asyncMode: z.boolean().optional(),
   ackText: z.string().optional(),
@@ -96,6 +97,7 @@ export const DingtalkConfigSchema = z
     groupPolicy: GroupPolicySchema.optional().default("open"),
     requireMention: z.boolean().optional().default(true),
     separateSessionByConversation: z.boolean().optional().default(true),
+    sharedMemoryAcrossConversations: z.boolean().optional().default(false),
     groupSessionScope: GroupSessionScopeSchema.optional().default("group"),
     // Multi-account configuration
     accounts: z.record(z.string(), DingtalkAccountConfigSchema.optional()).optional(),

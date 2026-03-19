@@ -52,8 +52,6 @@
 
 ### 操作系统支持
 
-本插件在以下系统上经过验证：
-
 - macOS / Linux：使用默认的 Shell 终端（zsh、bash 等）。
 - Windows：
   - 推荐使用 **PowerShell** 或 **Windows Terminal**。
@@ -236,9 +234,8 @@ openclaw logs --follow
 **原因**：Gateway 认证失败
 
 **解决方案**：
-1. 检查 `~/.openclaw/openclaw.json` 中的 `gateway.auth.token`
-2. 确保 `channels.dingtalk-connector` 中的 `gatewayToken` 与网关 token 匹配
-3. 重启网关：`openclaw gateway restart`
+
+升级到最新版本
 
 ---
 
@@ -257,21 +254,12 @@ openclaw logs --follow
 
 **验证步骤**：
 
-1. **测试凭证**：
-   ```bash
-   curl -X POST "https://api.dingtalk.com/v1.0/oauth2/accessToken" \
-     -H "Content-Type: application/json" \
-     -d '{"appKey": "你的clientId", "appSecret": "你的clientSecret"}'
-   ```
-   - 成功：返回 `accessToken`
-   - 失败：返回 `400` 或 `invalid`
-
-2. **检查应用状态**：
+1. **检查应用状态**：
    - 登录 [钉钉开放平台](https://open-dev.dingtalk.com/)
    - 确认应用已发布
    - 确认机器人已启用且为 Stream 模式
 
-3. **重新发布应用**：
+2. **重新发布应用**：
    - 修改任何配置后，必须点击 **保存** → **发布**
 
 ---
