@@ -66,22 +66,24 @@ const AICardStatus = {
 
 /**
  * 会话消息队列管理
- * 用于确保同一会话的消息按顺序处理，避免并发冲突导致AI返回空响应
+ * 用于确保同一会话+agent的消息按顺序处理，避免并发冲突导致AI返回空响应
+ * 队列键格式：{sessionId}:{agentId}
+ * 这样不同 agent 可以并发处理，同一 agent 的同一会话串行处理
  */
 const sessionQueues = new Map<string, Promise<void>>();
 
 /**
- * 清理过期的会话队列（超过5分钟没有新消息的会话）
+ * 清理过期的会话队列（超过5分钟没有新消息的会话+agent）
  */
 const sessionLastActivity = new Map<string, number>();
 const SESSION_QUEUE_TTL = 5 * 60 * 1000; // 5分钟
 
 function cleanupExpiredSessionQueues(): void {
   const now = Date.now();
-  for (const [sessionId, lastActivity] of sessionLastActivity.entries()) {
+  for (const [queueKey, lastActivity] of sessionLastActivity.entries()) {
     if (now - lastActivity > SESSION_QUEUE_TTL) {
-      sessionQueues.delete(sessionId);
-      sessionLastActivity.delete(sessionId);
+      sessionQueues.delete(queueKey);
+      sessionLastActivity.delete(queueKey);
     }
   }
 }
@@ -1166,50 +1168,76 @@ async function handleDingTalkMessageInternal(params: HandleMessageParams): Promi
 
 /**
  * 消息处理入口函数（带队列管理）
- * 确保同一会话的消息按顺序处理，避免并发冲突
+ * 确保同一会话+agent的消息按顺序处理，避免并发冲突
  */
 export async function handleDingTalkMessage(params: HandleMessageParams): Promise<void> {
-  const { data, log } = params;
+  const { accountId, data, log, cfg } = params;
   
   // 构建会话标识（与会话上下文保持一致）
   const isDirect = data.conversationType === '1';
   const senderId = data.senderStaffId || data.senderId;
   const conversationId = data.conversationId;
-  const sessionId = isDirect ? senderId : conversationId;
+  const baseSessionId = isDirect ? senderId : conversationId;
   
-  if (!sessionId) {
+  if (!baseSessionId) {
     log?.warn?.('无法构建会话标识，跳过队列管理');
     return handleDingTalkMessageInternal(params);
   }
   
-  // 更新会话活跃时间
-  sessionLastActivity.set(sessionId, Date.now());
+  // 解析 agentId（与消息处理逻辑保持一致）
+  const chatType = isDirect ? "direct" : "group";
+  const peerId = isDirect ? senderId : conversationId;
   
-  // 获取该会话的上一个处理任务
-  const previousTask = sessionQueues.get(sessionId) || Promise.resolve();
+  let matchedAgentId: string | null = null;
+  if (cfg.bindings && cfg.bindings.length > 0) {
+    for (const binding of cfg.bindings) {
+      const match = binding.match;
+      if (match.channel && match.channel !== "dingtalk-connector") continue;
+      if (match.accountId && match.accountId !== accountId) continue;
+      if (match.peer) {
+        if (match.peer.kind && match.peer.kind !== chatType) continue;
+        if (match.peer.id && match.peer.id !== '*' && match.peer.id !== peerId) continue;
+      }
+      matchedAgentId = binding.agentId;
+      break;
+    }
+  }
+  if (!matchedAgentId) {
+    matchedAgentId = cfg.defaultAgent || 'main';
+  }
+  
+  // 构建队列标识：会话 + agentId
+  // 这样不同 agent 可以并发处理，同一 agent 的同一会话串行处理
+  const queueKey = `${baseSessionId}:${matchedAgentId}`;
+  
+  // 更新会话活跃时间
+  sessionLastActivity.set(queueKey, Date.now());
+  
+  // 获取该会话+agent的上一个处理任务
+  const previousTask = sessionQueues.get(queueKey) || Promise.resolve();
   
   // 创建当前消息的处理任务
   const currentTask = previousTask
     .then(async () => {
-      log?.info?.(`[队列] 开始处理消息，sessionId=${sessionId}`);
+      log?.info?.(`[队列] 开始处理消息，queueKey=${queueKey}`);
       await handleDingTalkMessageInternal(params);
-      log?.info?.(`[队列] 消息处理完成，sessionId=${sessionId}`);
+      log?.info?.(`[队列] 消息处理完成，queueKey=${queueKey}`);
     })
     .catch((err: any) => {
-      log?.error?.(`[队列] 消息处理异常，sessionId=${sessionId}, error=${err.message}`);
+      log?.error?.(`[队列] 消息处理异常，queueKey=${queueKey}, error=${err.message}`);
       // 不抛出错误，避免阻塞后续消息
     })
     .finally(() => {
       // 如果当前任务是队列中的最后一个任务，清理队列
-      if (sessionQueues.get(sessionId) === currentTask) {
-        sessionQueues.delete(sessionId);
-        log?.info?.(`[队列] 队列已清空，sessionId=${sessionId}`);
+      if (sessionQueues.get(queueKey) === currentTask) {
+        sessionQueues.delete(queueKey);
+        log?.info?.(`[队列] 队列已清空，queueKey=${queueKey}`);
       }
     });
   
   // 更新队列
-  sessionQueues.set(sessionId, currentTask);
-  log?.info?.(`[队列] 消息已加入队列，sessionId=${sessionId}, 队列大小=${sessionQueues.size}`);
+  sessionQueues.set(queueKey, currentTask);
+  log?.info?.(`[队列] 消息已加入队列，queueKey=${queueKey}, 队列大小=${sessionQueues.size}`);
   
   // 不等待任务完成，让消息异步处理
   // 这样可以立即返回，不阻塞 WebSocket 消息接收
