@@ -825,7 +825,7 @@ async function handleDingTalkMessageInternal(params: HandleMessageParams): Promi
       const parseResult = await parseFileContent(localPath, fileName, log);
       
       if (parseResult.type === 'text' && parseResult.content) {
-        // 文本类文件：将内容注入到上下文
+        // 文本类文件：将内容注入到上下文（即使解析成功也给出文件路径）
         const contentPreview = parseResult.content.length > 200 
           ? parseResult.content.slice(0, 200) + '...' 
           : parseResult.content;
@@ -833,6 +833,7 @@ async function handleDingTalkMessageInternal(params: HandleMessageParams): Promi
         fileContentParts.push(
           `📄 **${fileType}**: ${fileName}\n` +
           `✅ 已解析文件内容（${parseResult.content.length} 字符）\n` +
+          `💾 已保存到本地: ${localPath}\n` +
           `📝 内容预览:\n\`\`\`\n${contentPreview}\n\`\`\`\n\n` +
           `📋 完整内容:\n${parseResult.content}`
         );
