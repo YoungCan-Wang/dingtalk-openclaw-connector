@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { DingtalkConfig } from '../types/index.ts';
 import { DINGTALK_OAPI, getOapiAccessToken } from '../utils/index.ts';
-import { dingtalkOapiHttp } from '../utils/http-client.ts';
+import { dingtalkHttp, dingtalkOapiHttp } from '../utils/http-client.ts';
 
 // ============ 常量 ============
 

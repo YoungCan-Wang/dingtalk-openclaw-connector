@@ -276,6 +276,12 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
       // 处理媒体标记
       let finalText = accumulatedText;
       
+      // ✅ 如果累积的文本为空，使用默认提示文案
+      if (!finalText.trim()) {
+        finalText = '✅ 任务执行完成（无文本输出）';
+        log.info(`[DingTalk][closeStreaming] 累积文本为空，使用默认提示文案`);
+      }
+      
       // 获取 oapiToken 用于媒体处理
       const oapiToken = await getOapiAccessToken(account.config as DingtalkConfig);
       
@@ -420,7 +426,14 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
         const hasText = Boolean(text.trim());
         const skipTextForDuplicateFinal =
           info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
-        const shouldDeliverText = hasText && !skipTextForDuplicateFinal;
+        
+        // ✅ 如果是 final 响应且没有文本，使用默认提示文案
+        if (info?.kind === "final" && !hasText) {
+          text = '✅ 任务执行完成（无文本输出）';
+          log.info(`[DingTalk][deliver] final 响应无文本，使用默认提示文案`);
+        }
+        
+        const shouldDeliverText = Boolean(text.trim()) && !skipTextForDuplicateFinal;
 
         if (!shouldDeliverText) {
           log.info(`[DingTalk][deliver] 跳过发送：hasText=${hasText}, skipTextForDuplicateFinal=${skipTextForDuplicateFinal}`);

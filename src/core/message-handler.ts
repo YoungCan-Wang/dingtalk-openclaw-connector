@@ -266,6 +266,11 @@ export async function downloadImageToFile(
   try {
     log?.info?.(`开始下载图片: ${downloadUrl.slice(0, 100)}...`);
     const resp = await dingtalkHttp.get(downloadUrl, {
+      proxy: false, // 禁用代理，避免 PAC 文件影响
+
+      headers: {
+        'Content-Type': undefined, // 删除默认的 Content-Type 请求头，让 OSS 签名验证通过
+      },
       responseType: 'arraybuffer',
       timeout: 30_000,
     });
@@ -366,6 +371,10 @@ export async function downloadFileToLocal(
   try {
     log?.info?.(`开始下载文件: ${fileName}`);
     const resp = await dingtalkHttp.get(downloadUrl, {
+      proxy: false, // 禁用代理，避免 PAC 文件影响
+      headers: {
+        'Content-Type': undefined, // 删除默认的 Content-Type 请求头，让 OSS 签名验证通过
+      },
       responseType: 'arraybuffer',
       timeout: 60_000, // 文件可能较大，增加超时时间
     });
@@ -407,7 +416,8 @@ export async function downloadFileToLocal(
     log?.info?.(`文件下载成功: ${fileName}, size=${buffer.length} bytes, path=${localPath}`);
     return localPath;
   } catch (err: any) {
-    log?.error?.(`文件下载失败: ${fileName}, error=${err.message}`);
+    console.error(`[ERROR] downloadFileToLocal 异常: ${err.message}`);
+    console.error(`[ERROR] 异常堆栈:\n${err.stack}`);
     return null;
   }
 }
@@ -526,7 +536,7 @@ interface HandleMessageParams {
 /**
  * 内部消息处理函数（实际执行消息处理逻辑）
  */
-async function handleDingTalkMessageInternal(params: HandleMessageParams): Promise<void> {
+export async function handleDingTalkMessageInternal(params: HandleMessageParams): Promise<void> {
   const { accountId, config, data, sessionWebhook, runtime, log, cfg } = params;
 
   const content = extractMessageContent(data);
@@ -1192,13 +1202,13 @@ async function handleDingTalkMessageInternal(params: HandleMessageParams): Promi
  */
 export async function handleDingTalkMessage(params: HandleMessageParams): Promise<void> {
   const { accountId, data, log, cfg } = params;
-  
+
   // 构建会话标识（与会话上下文保持一致）
   const isDirect = data.conversationType === '1';
   const senderId = data.senderStaffId || data.senderId;
   const conversationId = data.conversationId;
   const baseSessionId = isDirect ? senderId : conversationId;
-  
+
   if (!baseSessionId) {
     log?.warn?.('无法构建会话标识，跳过队列管理');
     return handleDingTalkMessageInternal(params);
@@ -1207,7 +1217,7 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
   // 解析 agentId（与消息处理逻辑保持一致）
   const chatType = isDirect ? "direct" : "group";
   const peerId = isDirect ? senderId : conversationId;
-  
+
   let matchedAgentId: string | null = null;
   if (cfg.bindings && cfg.bindings.length > 0) {
     for (const binding of cfg.bindings) {
@@ -1229,38 +1239,46 @@ export async function handleDingTalkMessage(params: HandleMessageParams): Promis
   // 构建队列标识：会话 + agentId
   // 这样不同 agent 可以并发处理，同一 agent 的同一会话串行处理
   const queueKey = `${baseSessionId}:${matchedAgentId}`;
-  
-  // 更新会话活跃时间
-  sessionLastActivity.set(queueKey, Date.now());
-  
-  // 获取该会话+agent的上一个处理任务
-  const previousTask = sessionQueues.get(queueKey) || Promise.resolve();
-  
-  // 创建当前消息的处理任务
-  const currentTask = previousTask
-    .then(async () => {
-      log?.info?.(`[队列] 开始处理消息，queueKey=${queueKey}`);
-      await handleDingTalkMessageInternal(params);
-      log?.info?.(`[队列] 消息处理完成，queueKey=${queueKey}`);
-    })
-    .catch((err: any) => {
-      log?.error?.(`[队列] 消息处理异常，queueKey=${queueKey}, error=${err.message}`);
-      // 不抛出错误，避免阻塞后续消息
-    })
-    .finally(() => {
-      // 如果当前任务是队列中的最后一个任务，清理队列
-      if (sessionQueues.get(queueKey) === currentTask) {
-        sessionQueues.delete(queueKey);
-        log?.info?.(`[队列] 队列已清空，queueKey=${queueKey}`);
-      }
-    });
-  
-  // 更新队列
-  sessionQueues.set(queueKey, currentTask);
-  log?.info?.(`[队列] 消息已加入队列，queueKey=${queueKey}, 队列大小=${sessionQueues.size}`);
-  
-  // 不等待任务完成，让消息异步处理
-  // 这样可以立即返回，不阻塞 WebSocket 消息接收
+
+  try {
+
+    // 更新会话活跃时间
+    sessionLastActivity.set(queueKey, Date.now());
+
+    // 获取该会话+agent的上一个处理任务
+    const previousTask = sessionQueues.get(queueKey) || Promise.resolve();
+
+    // 创建当前消息的处理任务
+    const currentTask = previousTask
+      .then(async () => {
+        log?.info?.(`[队列] 开始处理消息，queueKey=${queueKey}`);
+        await handleDingTalkMessageInternal(params);
+        log?.info?.(`[队列] 消息处理完成，queueKey=${queueKey}`);
+      })
+      .catch((err: any) => {
+        log?.error?.(`[队列] 消息处理异常，queueKey=${queueKey}, error=${err.message}`);
+        // 不抛出错误，避免阻塞后续消息
+      })
+      .finally(() => {
+        // 如果当前任务是队列中的最后一个任务，清理队列
+        if (sessionQueues.get(queueKey) === currentTask) {
+          sessionQueues.delete(queueKey);
+          log?.info?.(`[队列] 队列已清空，queueKey=${queueKey}`);
+        }
+      });
+    
+    // 更新队列
+    sessionQueues.set(queueKey, currentTask);
+
+    // 等待当前任务完成
+    await currentTask;
+    console.log(`[DEBUG] 任务执行完成`);
+  } catch (err: any) {
+    console.error(`[DEBUG] 队列管理异常: ${err.message}`);
+    console.error(`[DEBUG] 队列管理异常堆栈: ${err.stack}`);
+    // 如果队列管理失败，直接调用内部处理函数
+    return handleDingTalkMessageInternal(params);
+  }
 }
 
 // handleDingTalkMessage 已在函数定义处直接导出
