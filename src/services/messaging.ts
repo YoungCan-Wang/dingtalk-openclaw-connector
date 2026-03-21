@@ -591,9 +591,10 @@ export async function sendMediaToDingTalk(params: {
     });
   }
 
-  // 1. 先发送文本消息（如果有）
-  if (text?.trim()) {
-    log.info("先发送文本消息");
+  // 1. 先发送文本消息（如果有且不为空）
+  // 注意：只有在 text 有实际内容时才发送，避免发送空消息
+  if (text && text.trim().length > 0) {
+    log.info("先发送文本消息:", text);
     await sendProactive(config, targetParam, text, {
       msgType: "text",
       replyToId,
@@ -726,33 +727,28 @@ export async function sendMediaToDingTalk(params: {
       };
     }
 
-    // 对于音频、文件，发送包含下载链接的文本消息
+    // 对于音频、文件，发送真正的文件消息
     const fs = await import("fs");
     const stats = fs.statSync(mediaUrl);
-    const fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+    
+    // 获取文件扩展名作为 fileType
+    const fileType = ext || "file";
+    
+    // 构建文件信息
+    const fileInfo = {
+      fileName: fileName,
+      fileType: fileType,
+    };
 
-    // 使用上传结果中的下载链接
-    const downloadUrl = uploadResult.downloadUrl;
+    // 使用 sendFileProactive 发送文件消息
+    const { sendFileProactive } = await import("./media.ts");
+    await sendFileProactive(config, targetParam, fileInfo, uploadResult.mediaId, log);
 
-    // 根据媒体类型选择图标和描述
-    let icon = "📄";
-    let typeLabel = "文件";
-    if (mediaType === "voice") {
-      icon = "🎵";
-      typeLabel = "音频";
-    }
-
-    const message = `${icon} ${typeLabel}文件已上传\n\n文件: ${fileName}\n大小: ${fileSizeMB} MB\n\n下载链接: ${downloadUrl}`;
-
-    const result = await sendProactive(config, targetParam, message, {
-      msgType: "text",
-      replyToId,
-    });
-
-    // 确保返回值中有 processQueryKey，告诉 SDK 消息已发送成功
+    // 返回成功结果
     return {
-      ...result,
-      processQueryKey: result.processQueryKey || "media-message-sent",
+      ok: true,
+      usedAICard: false,
+      processQueryKey: "file-message-sent",
     };
   } catch (err: any) {
     log.error("发送媒体消息失败:", err.message);
@@ -916,20 +912,18 @@ async function sendProactiveInternal(
       ? `${DINGTALK_API}/v1.0/robot/oToMessages/batchSend`
       : `${DINGTALK_API}/v1.0/robot/groupMessages/send`;
 
-    // 构建消息体
+    // 使用 buildMsgPayload 构建消息体（支持所有消息类型）
+    const payload = buildMsgPayload(msgType, content, options.title);
+    if ("error" in payload) {
+      log.error("构建消息失败:", payload.error);
+      return { ok: false, error: payload.error, usedAICard: false };
+    }
+
     const body: any = {
       robotCode: config.clientId,
-      msgKey: msgType === "markdown" ? "sampleMarkdown" : "sampleText",
+      msgKey: payload.msgKey,
+      msgParam: JSON.stringify(payload.msgParam),
     };
-
-    if (msgType === "markdown") {
-      body.msgParam = JSON.stringify({
-        title: options.title || "Message",
-        text: content,
-      });
-    } else {
-      body.msgParam = JSON.stringify({ content });
-    }
 
     // ✅ 根据目标类型设置不同的参数
     if (isUser) {

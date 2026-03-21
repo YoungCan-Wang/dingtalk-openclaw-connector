@@ -138,6 +138,7 @@ export async function monitorSingleAccount(
   // ============ 连接状态管理 ============
 
   let lastSocketAvailableTime = Date.now();
+  let connectionEstablishedTime = Date.now(); // 记录连接建立时间
   let isReconnecting = false;
   let reconnectAttempts = 0;
   let keepAliveTimer: NodeJS.Timeout | null = null;
@@ -226,18 +227,49 @@ export async function monitorSingleAccount(
       // 2. 重新建立连接
       await client.connect();
 
-      // 3. 验证连接是否真正建立（必须检查 socket 状态）
-      const socketState = client.socket?.readyState;
-      if (socketState !== 1) {
-        // socket 状态不是 OPEN (1)，说明连接未真正建立
-        throw new Error(`连接未建立，socket 状态=${socketState} (期望=1)`);
+      // 3. 等待连接真正建立（监听 open 事件，最多等待 10 秒）
+      const connectionEstablished = await new Promise<boolean>((resolve) => {
+        const timeout = setTimeout(() => {
+          resolve(false);
+        }, 10_000); // 10 秒超时
+
+        // 如果已经是 OPEN 状态，直接返回
+        if (client.socket?.readyState === 1) {
+          clearTimeout(timeout);
+          resolve(true);
+          return;
+        }
+
+        // 否则监听 open 事件
+        const onOpen = () => {
+          clearTimeout(timeout);
+          client.socket?.removeListener('open', onOpen);
+          client.socket?.removeListener('error', onError);
+          resolve(true);
+        };
+
+        const onError = (err: any) => {
+          clearTimeout(timeout);
+          client.socket?.removeListener('open', onOpen);
+          client.socket?.removeListener('error', onError);
+          logger.warn(`连接建立失败: ${err.message}`);
+          resolve(false);
+        };
+
+        client.socket?.once('open', onOpen);
+        client.socket?.once('error', onError);
+      });
+
+      if (!connectionEstablished) {
+        throw new Error(`连接建立超时或失败`);
       }
 
-      // 4. 重置 socket 可用时间和重连计数
+      // 4. 重置 socket 可用时间、连接建立时间和重连计数
       lastSocketAvailableTime = Date.now();
+      connectionEstablishedTime = Date.now(); // 重置连接建立时间
       reconnectAttempts = 0; // 重连成功，重置计数
 
-      logger.info(`✅ 重连成功 (socket 状态=${socketState})`);
+      logger.info(`✅ 重连成功 (socket 状态=${client.socket?.readyState})`);
     } catch (err: any) {
       reconnectAttempts++;
       log?.error?.(
@@ -329,11 +361,20 @@ export async function monitorSingleAccount(
 
         // 【心跳检测】检查 socket 状态
         const socketState = client.socket?.readyState;
+        const timeSinceConnection = Date.now() - connectionEstablishedTime;
         logger.debug(
-          `🔍 心跳检测：socket 状态=${socketState}, elapsed=${Math.round(elapsed / 1000)}s`,
+          `🔍 心跳检测：socket 状态=${socketState}, elapsed=${Math.round(elapsed / 1000)}s, 连接已建立=${Math.round(timeSinceConnection / 1000)}s`,
         );
 
+        // 给新建立的连接 15 秒宽限期，避免在连接建立初期就触发重连
         if (socketState !== 1) {
+          if (timeSinceConnection < 15_000) {
+            logger.debug(
+              `⏳ 连接建立中（已 ${Math.round(timeSinceConnection / 1000)}s），跳过状态检查`,
+            );
+            return;
+          }
+          
           logger.info(
             `⚠️ 心跳检测：socket 状态=${socketState}，触发重连...`,
           );
@@ -519,8 +560,6 @@ export async function monitorSingleAccount(
 
         // ===== 第三步：开始处理消息 =====
         logger.info(`🚀 开始处理消息...`);
-        logger.info(`AccountId: ${accountId}`);
-        logger.info(`HasConfig: ${!!account.config}`);
 
         await messageHandler({
           accountId,
