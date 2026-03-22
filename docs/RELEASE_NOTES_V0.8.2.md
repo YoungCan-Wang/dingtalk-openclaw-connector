@@ -1,4 +1,4 @@
-# Release Notes - v0.8.3
+# Release Notes - v0.8.2
 
 ## 🎉 新版本亮点 / Highlights
 
@@ -51,5 +51,5 @@ openclaw plugins install https://github.com/DingTalk-Real-AI/dingtalk-openclaw-c
 ---
 
 **发布日期 / Release Date**：2026-03-22  
-**版本号 / Version**：v0.8.3  
+**版本号 / Version**：v0.8.2  
 **兼容性 / Compatibility**：OpenClaw Gateway 0.4.0+
