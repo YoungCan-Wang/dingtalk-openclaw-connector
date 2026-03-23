@@ -114,7 +114,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
   
   // ✅ 节流控制：避免频繁调用钉钉 API 导致 QPS 限流
   let lastUpdateTime = 0;
-  const updateInterval = 1000; // 最小更新间隔 1000ms（钉钉 QPS 限制：40 次/秒，安全起见设为 1 秒）
+  const updateInterval = 500; // 最小更新间隔 500ms（钉钉 QPS 限制：40 次/秒，保守起见设为 0.5 秒）
 
   // ✅ 错误兜底：防止重复发送错误消息
   const deliveredErrorTypes = new Set<string>();
@@ -385,11 +385,12 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
     core.channel.reply.createReplyDispatcherWithTyping({
       ...prefixOptions,
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, agentId),
-      onReplyStart: async () => {
+      onReplyStart: () => {
         deliveredFinalTexts.clear();
         log.info(`[DingTalk][onReplyStart] 开始回复，流式 enabled=${streamingEnabled}`);
         if (streamingEnabled) {
-          await startStreaming();
+          // fire-and-forget：不阻塞 onReplyStart 返回，onPartialReply 会等待 Card 创建完成
+          void startStreaming();
         }
         typingCallbacks.onActive?.();
       },
