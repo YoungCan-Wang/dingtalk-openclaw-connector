@@ -126,10 +126,10 @@ export async function uploadMediaToDingTalk(
     log?.info?.(`上传文件：${absPath} (${fileSizeMB}MB), uploadType=${uploadType}`);
     const resp = await dingtalkUploadHttp.post(
       `${DINGTALK_OAPI}/media/upload`,
-      formData,
+      form,
       {
         params: { access_token: oapiToken, type: mediaType },
-        headers: formData.getHeaders(),
+        headers: form.getHeaders(),
         timeout: 60_000,
         maxBodyLength: Infinity,
       },

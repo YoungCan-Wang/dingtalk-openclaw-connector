@@ -67,21 +67,15 @@ export async function enableUploadTransaction(
     form.append('file_name', fileName);
     form.append('file_size', fileSize.toString());
 
-    const uploadResp = await dingtalkUploadHttp.post(
-  `${DINGTALK_OAPI}/cspace/add_chunk`,
-  chunkData,
-  {
-    params: {
-      access_token: oapiToken,
-      agent_id: config.agentId || config.clientId,
-      transaction_id: transactionId,
-      chunk_sequence: i,
-    },
-    headers: { 'Content-Type': 'application/octet-stream' },
-    timeout: 60_000,
-    maxBodyLength: Infinity,
-  },
-);
+    const resp = await dingtalkOapiHttp.post<UploadTransactionResponse>(
+      `${DINGTALK_OAPI}/file/upload/transaction/enable`,
+      form,
+      {
+        params: { access_token: oapiToken },
+        headers: form.getHeaders(),
+        timeout: 60_000,
+      }
+    );
 
     if (resp.data.errcode === 0) {
       log.info(`事务开启成功，upload_id: ${resp.data.upload_id}`);
@@ -129,20 +123,15 @@ export async function uploadFileBlock(
       contentType: 'application/octet-stream',
     });
 
-    const commitResp = await dingtalkOapiHttp.post(
-  `${DINGTALK_OAPI}/cspace/commit`,
-  null,
-  {
-    params: {
-      access_token: oapiToken,
-      agent_id: config.agentId || config.clientId,
-      transaction_id: transactionId,
-      file_size: fileSize,
-      chunk_numbers: totalChunks,
-    },
-    timeout: 30_000,
-  },
-);
+    const resp = await dingtalkOapiHttp.post<UploadBlockResponse>(
+      `${DINGTALK_OAPI}/file/upload/chunk`,
+      form,
+      {
+        params: { access_token: oapiToken },
+        headers: form.getHeaders(),
+        timeout: 60_000,
+      }
+    );
 
     if (resp.data.errcode === 0) {
       log.info(`块 ${chunkNumber} 上传成功`);

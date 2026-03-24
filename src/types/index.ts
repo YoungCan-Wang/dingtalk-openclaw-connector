@@ -1,4 +1,11 @@
-import type { BaseProbeResult } from "openclaw/plugin-sdk";
+// 本地类型定义
+interface BaseProbeResult<T = any> {
+  ok: boolean;
+  error?: string;
+  data?: T;
+  [key: string]: any;
+}
+
 import type {
   DingtalkConfigSchema,
   DingtalkGroupSchema,

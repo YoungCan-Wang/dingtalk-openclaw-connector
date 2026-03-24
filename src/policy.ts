@@ -1,5 +1,12 @@
-import type { ToolPolicy } from "openclaw/plugin-sdk";
-import type { ClawdbotConfig } from "openclaw/plugin-sdk";
+// 类型定义
+interface ClawdbotConfig {
+  [key: string]: any;
+}
+
+interface ToolPolicy {
+  allow?: string[];
+  deny?: string[];
+}
 import { resolveDingtalkAccount } from "./config/accounts.ts";
 
 export function resolveDingtalkGroupToolPolicy(params: {

@@ -1,39 +1,49 @@
-// openclaw 2026.3.23+ 将 plugin-sdk 拆分为子模块，旧版本仍从主入口导出。
-// 使用动态 import 兼容新旧两种版本：优先尝试新版子路径，失败则回退到旧版主入口。
-import type { ClawdbotConfig, RuntimeEnv } from "openclaw/plugin-sdk/runtime";
-import type { ReplyPayload } from "openclaw/plugin-sdk/reply-payload";
+// 类型定义
+interface ClawdbotConfig {
+  [key: string]: any;
+}
 
-type ChannelRuntimeModule = {
-  createReplyPrefixOptions: typeof import("openclaw/plugin-sdk/channel-runtime").createReplyPrefixOptions;
-  createTypingCallbacks: typeof import("openclaw/plugin-sdk/channel-runtime").createTypingCallbacks;
-  logTypingFailure: typeof import("openclaw/plugin-sdk/channel-runtime").logTypingFailure;
-};
+interface RuntimeEnv {
+  log?: (...args: any[]) => void;
+  error?: (...args: any[]) => void;
+  warn?: (...args: any[]) => void;
+  debug?: (...args: any[]) => void;
+  info?: (...args: any[]) => void;
+  [key: string]: any;
+}
+
+interface ReplyPayload {
+  text?: string;
+  [key: string]: any;
+}
+
+// ✅ 动态导入 channel-runtime 模块
+const channelRuntimeModule = await import("openclaw/plugin-sdk/channel-runtime") as any;
 
 const {
   createReplyPrefixOptions,
   createTypingCallbacks,
   logTypingFailure,
-}: ChannelRuntimeModule = await import("openclaw/plugin-sdk/channel-runtime").catch(
-  () => import("openclaw/plugin-sdk") as Promise<ChannelRuntimeModule>
-);
+} = channelRuntimeModule;
+
 import { resolveDingtalkAccount } from "./config/accounts.ts";
 import { getDingtalkRuntime } from "./runtime.ts";
 import type { DingtalkConfig } from "./types/index.ts";
 import {
   createAICardForTarget,
-  streamAICard,
   finishAICard,
-  sendMessage,
-  type AICardTarget,
+  streamAICard,
   type AICardInstance,
-} from "./services/messaging/index.ts";
+  type AICardTarget,
+} from "./services/messaging/card.ts";
+import { sendMessage } from "./services/messaging.ts";
+import { getOapiAccessToken } from "./utils/token.ts";
 import {
   processLocalImages,
   processVideoMarkers,
   processAudioMarkers,
   processFileMarkers,
 } from "./services/media/index.ts";
-import { getAccessToken, getOapiAccessToken } from "./utils/index.ts";
 
 // ============ 新会话命令归一化 ============
 
@@ -192,16 +202,16 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
     stop: async () => {
       // 钉钉暂不支持打字指示器
     },
-    onStartError: (err) =>
+    onStartError: (err: any) =>
       logTypingFailure({
-        log: (message) => params.runtime.log?.(message),
+        log: (message: any) => params.runtime.log?.(message),
         channel: "dingtalk-connector",
         action: "start",
         error: err,
       }),
-    onStopError: (err) =>
+    onStopError: (err: any) =>
       logTypingFailure({
-        log: (message) => params.runtime.log?.(message),
+        log: (message: any) => params.runtime.log?.(message),
         channel: "dingtalk-connector",
         action: "stop",
         error: err,
@@ -217,7 +227,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
   const chunkMode = core.channel.text.resolveChunkMode(cfg, "dingtalk-connector");
 
   // 流式 AI Card 支持
-  const streamingEnabled = account.config?.streaming !== false;
+  const streamingEnabled = (account.config as any)?.streaming !== false;
   let isCreatingCard = false;  // ✅ 添加创建中标志，防止并发创建
 
   const startStreaming = async () => {
@@ -243,7 +253,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
     // 这样用户看到的是同一条消息从 ACK 文案更新为最终结果，而不是多出一条消息
     if (preCreatedCard) {
       log.info(`[DingTalk][startStreaming] 复用预创建 AI Card，cardInstanceId=${preCreatedCard.cardInstanceId}`);
-      currentCardTarget = preCreatedCard;
+      currentCardTarget = preCreatedCard as any;
       accumulatedText = "";
       return;
     }
@@ -261,14 +271,9 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
       const card = await createAICardForTarget(
         account.config as DingtalkConfig,
         target,
-        {
-          info: params.runtime.info,
-          error: params.runtime.error,
-          warn: params.runtime.warn,
-          debug: params.runtime.debug,
-        }
+        params.runtime as any
       );
-      currentCardTarget = card;
+      currentCardTarget = card as any;
       accumulatedText = "";
       
       if (card) {
@@ -284,7 +289,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
     }
   };
 
-  const closeStreaming = async () => {
+  const closeStreaming: () => Promise<void> = async () => {
     if (!currentCardTarget) {
       log.info(`[DingTalk][closeStreaming] 无 AI Card，跳过关闭`);
       return;
@@ -362,14 +367,9 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
 
       log.info(`[DingTalk][closeStreaming] 准备调用 finishAICard，文本长度=${finalText.length}`);
       await finishAICard(
-        currentCardTarget as AICardInstance,
+        currentCardTarget as any,
         finalText,
-        {
-          info: params.runtime.info,
-          error: params.runtime.error,
-          warn: params.runtime.warn,
-          debug: params.runtime.debug,
-        }
+        params.runtime as any
       );
       log.info(`[DingTalk][closeStreaming] ✅ AI Card 关闭成功`);
     } catch (error: any) {
@@ -479,10 +479,10 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
             log.info(`[DingTalk][deliver] 流式更新 AI Card，累积文本长度=${accumulatedText.length}`);
             try {
               await streamAICard(
-                currentCardTarget as AICardInstance,
+                currentCardTarget as any,
                 accumulatedText,
                 false,
-                params.runtime.log
+                params.runtime as any
               );
             } catch (streamErr: any) {
               log.error(`[DingTalk][deliver] ❌ streamAICard 失败：${streamErr.message}`);
@@ -655,15 +655,10 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
             
             try {
               await streamAICard(
-                currentCardTarget as AICardInstance,
+                currentCardTarget as any,
                 displayContent,
                 false,
-                {
-                  info: params.runtime.info,
-                  error: params.runtime.error,
-                  warn: params.runtime.warn,
-                  debug: params.runtime.debug,
-                }
+                params.runtime as any
               );
               lastUpdateTime = now;
               log.debug(`[DingTalk][onPartialReply] ✅ AI Card 更新成功`);

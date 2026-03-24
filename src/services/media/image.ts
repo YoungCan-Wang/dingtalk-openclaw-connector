@@ -3,7 +3,15 @@
  * 支持图片上传、本地路径处理
  */
 
-import type { Logger } from 'openclaw/plugin-sdk';
+// 本地类型定义
+interface Logger {
+  info?: (...args: any[]) => void;
+  warn?: (...args: any[]) => void;
+  error?: (...args: any[]) => void;
+  debug?: (...args: any[]) => void;
+  [key: string]: any;
+}
+
 import {
   LOCAL_IMAGE_RE,
   BARE_IMAGE_PATH_RE,
@@ -35,7 +43,7 @@ export async function processLocalImages(
       const cleanPath = rawPath.replace(/\\ /g, ' ');
       const uploadResult = await uploadMediaToDingTalk(cleanPath, 'image', oapiToken, 20 * 1024 * 1024, log);
       if (uploadResult) {
-        result = result.replace(fullMatch, `![${alt}](${uploadResult.downloadUrl})`);
+        result = result.replace(fullMatch, `![${alt}](${uploadResult})`);
       }
     }
   }
@@ -56,7 +64,7 @@ export async function processLocalImages(
       log?.info?.(`[DingTalk][Media] 纯文本图片："${fullMatch}" -> path="${rawPath}"`);
       const uploadResult = await uploadMediaToDingTalk(rawPath, 'image', oapiToken, 20 * 1024 * 1024, log);
       if (uploadResult) {
-        const replacement = `![](${uploadResult.downloadUrl})`;
+        const replacement = `![](${uploadResult})`;
         result = result.slice(0, match.index!) + result.slice(match.index!).replace(fullMatch, replacement);
         log?.info?.(`[DingTalk][Media] 替换纯文本路径为图片：${replacement}`);
       }

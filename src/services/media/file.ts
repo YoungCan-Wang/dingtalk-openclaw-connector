@@ -59,7 +59,7 @@ export async function processFileMarkers(
       const fileData = JSON.parse(match[1]);
       const absPath = toLocalPath(fileData.path);
       const uploadResult = await uploadMediaToDingTalk(absPath, 'file', oapiToken, 20 * 1024 * 1024, log);
-      result = result.replace(full, uploadResult ? `[文件已上传：${uploadResult.downloadUrl}]` : '⚠️ 文件上传失败');
+      result = result.replace(full, uploadResult ? `[文件已上传：${uploadResult}]` : '⚠️ 文件上传失败');
     } catch {
       log?.warn?.(`${logPrefix} 解析文件标记失败：${match[1]}`);
       result = result.replace(full, '');
