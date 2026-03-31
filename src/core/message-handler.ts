@@ -49,12 +49,7 @@ import {
   processLocalImages, 
   processVideoMarkers, 
   processAudioMarkers, 
-  processFileMarkers,
-  uploadMediaToDingTalk,
-  toLocalPath,
-  FILE_MARKER_PATTERN,
-  VIDEO_MARKER_PATTERN,
-  AUDIO_MARKER_PATTERN
+  processFileMarkers
 } from "../services/media/index.ts";
 import { sendProactive, type AICardTarget } from "../services/messaging/index.ts";
 import { createAICardForTarget, streamAICard, type AICardInstance } from "../services/messaging/card.ts";
@@ -141,6 +136,217 @@ interface ExtractedMessage {
   fileNames: string[];
   atDingtalkIds: string[];
   atMobiles: string[];
+  /** interactiveCard 消息中提取的文档链接（biz_custom_action_url），用于下游 URL 路由 */
+  interactiveCardUrl?: string;
+  /** actionCard 消息中提取的操作链接（单个时直接存储），用于下游 URL 路由 */
+  actionCardUrl?: string;
+}
+
+/**
+ * 解析 data.content 字段：可能是对象，也可能是 JSON 字符串（钉钉部分 API 版本会将 content 序列化为字符串）。
+ * 返回解析后的对象，或 null（字段不存在 / 无法解析）。
+ */
+function resolveContent(data: any): any | null {
+  const raw = data?.content;
+  if (raw == null) return null;
+  if (typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      // 非 JSON 字符串，忽略
+    }
+  }
+  return null;
+}
+
+/**
+ * 从消息的内容容器（data.text 或 data.content）中提取引用消息文本，最多递归 maxDepth 层。
+ * 对齐 Rust chatbot.rs 的 extract_quoted_msg_text 逻辑。
+ *
+ * 钉钉引用消息结构：
+ * { isReplyMsg: true, repliedMsg: { msgType, content, msgId, senderId } }
+ */
+function extractQuotedMsgText(container: any, maxDepth: number): string | null {
+  if (maxDepth <= 0 || !container) return null;
+  if (!container.isReplyMsg) return null;
+
+  const repliedMsg = container.repliedMsg;
+  if (!repliedMsg) return null;
+
+  const msgType = repliedMsg.msgType || 'text';
+
+  // 解析 repliedMsg.content（可能是对象或 JSON 字符串）
+  let contentObj: any = null;
+  const rawContent = repliedMsg.content;
+  if (rawContent && typeof rawContent === 'object') {
+    contentObj = rawContent;
+  } else if (typeof rawContent === 'string') {
+    try {
+      const parsed = JSON.parse(rawContent);
+      if (parsed && typeof parsed === 'object') contentObj = parsed;
+    } catch {
+      // 忽略
+    }
+  }
+
+  let bodyText = '';
+  switch (msgType) {
+    case 'text': {
+      // repliedMsg.content.text 存放正文
+      bodyText = contentObj?.text?.trim() || repliedMsg.text?.trim() || '';
+      // 嵌套引用：content 中可能还有 isReplyMsg/repliedMsg
+      if (contentObj?.isReplyMsg) {
+        const nested = extractQuotedMsgText(contentObj, maxDepth - 1);
+        if (nested) bodyText = bodyText ? `${bodyText}\n${nested}` : nested;
+      }
+      break;
+    }
+    case 'richText': {
+      const richList: any[] = contentObj?.richText || [];
+      const textParts = richList
+        .filter((item: any) => item.text && item.msgType !== 'skill' && !item.skillData)
+        .map((item: any) => item.text as string);
+      bodyText = textParts.join('');
+      break;
+    }
+    case 'picture':
+      bodyText = '[图片]';
+      break;
+    case 'video':
+      bodyText = '[视频]';
+      break;
+    case 'audio':
+      bodyText = contentObj?.recognition || '[语音消息]';
+      break;
+    case 'file': {
+      const fileName = contentObj?.fileName || 'unknown';
+      bodyText = `[文件: ${fileName}]`;
+      break;
+    }
+    case 'markdown':
+      bodyText = contentObj?.text?.trim() || '[markdown消息]';
+      break;
+    case 'interactiveCard': {
+      const cardUrl = contentObj?.biz_custom_action_url || repliedMsg.biz_custom_action_url || '';
+      bodyText = cardUrl ? `收到交互式卡片链接：${cardUrl}` : '[interactiveCard消息]';
+      break;
+    }
+    default:
+      bodyText = `[${msgType}消息]`;
+  }
+
+  if (!bodyText) return null;
+  return `[引用] ${bodyText}`;
+}
+
+/**
+ * 从 richText 列表中提取媒体附件（图片 downloadCode）。
+ * 兼容新结构（content.richText）和旧结构（richText.richTextList）。
+ */
+function extractRichTextMediaAttachments(
+  data: any,
+  content: any,
+): { imageUrls: string[]; downloadCodes: string[]; fileNames: string[] } {
+  const imageUrls: string[] = [];
+  const downloadCodes: string[] = [];
+  const fileNames: string[] = [];
+
+  // 兼容新结构 content.richText 和旧结构 richText.richTextList
+  const richList: any[] =
+    content?.richText ||
+    data?.richText?.richTextList ||
+    [];
+
+  for (const item of richList) {
+    if (item.pictureUrl) {
+      imageUrls.push(item.pictureUrl);
+    }
+    if (item.downloadCode) {
+      const itemType: string = item.type || '';
+      if (itemType === 'picture' || !itemType) {
+        imageUrls.push(`downloadCode:${item.downloadCode}`);
+      } else if (itemType === 'video') {
+        downloadCodes.push(item.downloadCode);
+        fileNames.push(item.fileName || 'video.mp4');
+      } else if (itemType === 'audio') {
+        downloadCodes.push(item.downloadCode);
+        fileNames.push(item.fileName || 'audio.amr');
+      } else if (itemType === 'file') {
+        downloadCodes.push(item.downloadCode);
+        fileNames.push(item.fileName || '文件');
+      }
+    }
+  }
+
+  return { imageUrls, downloadCodes, fileNames };
+}
+
+/**
+ * 从 repliedMsg 中提取媒体附件（用于 reply 类型消息）。
+ */
+function extractRepliedMsgMediaAttachments(
+  repliedMsg: any,
+): { imageUrls: string[]; downloadCodes: string[]; fileNames: string[] } {
+  const imageUrls: string[] = [];
+  const downloadCodes: string[] = [];
+  const fileNames: string[] = [];
+
+  if (!repliedMsg) return { imageUrls, downloadCodes, fileNames };
+
+  const msgType = repliedMsg.msgType || 'text';
+
+  let contentObj: any = null;
+  const rawContent = repliedMsg.content;
+  if (rawContent && typeof rawContent === 'object') {
+    contentObj = rawContent;
+  } else if (typeof rawContent === 'string') {
+    try {
+      const parsed = JSON.parse(rawContent);
+      if (parsed && typeof parsed === 'object') contentObj = parsed;
+    } catch {
+      // 忽略
+    }
+  }
+
+  switch (msgType) {
+    case 'picture':
+    case 'video':
+    case 'audio': {
+      const code = contentObj?.downloadCode;
+      if (code) {
+        if (msgType === 'picture') {
+          imageUrls.push(`downloadCode:${code}`);
+        } else {
+          downloadCodes.push(code);
+          fileNames.push(contentObj?.fileName || (msgType === 'video' ? 'video.mp4' : 'audio.amr'));
+        }
+      }
+      break;
+    }
+    case 'file': {
+      const code = contentObj?.downloadCode;
+      if (code) {
+        downloadCodes.push(code);
+        fileNames.push(contentObj?.fileName || '文件');
+      }
+      break;
+    }
+    case 'richText': {
+      const richList: any[] = contentObj?.richText || [];
+      for (const item of richList) {
+        if (item.downloadCode) {
+          imageUrls.push(`downloadCode:${item.downloadCode}`);
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+
+  return { imageUrls, downloadCodes, fileNames };
 }
 
 export function extractMessageContent(data: any): ExtractedMessage {
@@ -149,57 +355,110 @@ export function extractMessageContent(data: any): ExtractedMessage {
     case 'text': {
       const atDingtalkIds = data.text?.at?.atDingtalkIds || [];
       const atMobiles = data.text?.at?.atMobiles || [];
-      return { 
-        text: data.text?.content?.trim() || '', 
-        messageType: 'text', 
-        imageUrls: [], 
-        downloadCodes: [], 
-        fileNames: [],
-        atDingtalkIds,
-        atMobiles
-      };
-    }
-    case 'richText': {
-      const parts = data.content?.richText || [];
-      const textParts: string[] = [];
-      const imageUrls: string[] = [];
-      const downloadCodes: string[] = [];
-      const fileNames: string[] = [];
 
-      for (const part of parts) {
-        if (part.text) {
-          textParts.push(part.text);
-        }
-        // 处理图片
-        if (part.pictureUrl) {
-          imageUrls.push(part.pictureUrl);
-        }
-        if (part.type === 'picture' && part.downloadCode) {
-          imageUrls.push(`downloadCode:${part.downloadCode}`);
-        }
-        // 处理视频
-        if (part.type === 'video' && part.downloadCode) {
-          downloadCodes.push(part.downloadCode);
-          fileNames.push(part.fileName || 'video.mp4');
-        }
-        // 处理音频
-        if (part.type === 'audio' && part.downloadCode) {
-          downloadCodes.push(part.downloadCode);
-          fileNames.push(part.fileName || 'audio');
-        }
-        // 处理文件
-        if (part.type === 'file' && part.downloadCode) {
-          downloadCodes.push(part.downloadCode);
-          fileNames.push(part.fileName || '文件');
+      const bodyText = data.text?.content?.trim() || '';
+
+      // 检测引用消息（isReplyMsg + repliedMsg 在 data.text 对象内）
+      const hasReply = !!data.text?.isReplyMsg;
+      const quotedText = extractQuotedMsgText(data.text, 3);
+      const text = quotedText ? `${bodyText}\n${quotedText}` : bodyText;
+
+      // 提取引用消息中的媒体附件（图片/视频/音频/文件）
+      const repliedMsgInText = data.text?.repliedMsg;
+      const { imageUrls, downloadCodes, fileNames } = extractRepliedMsgMediaAttachments(repliedMsgInText);
+
+      // 从引用消息的文本内容中提取 URL，触发链接路由（如 alidocs 文档链接）
+      // 场景：用户引用了一条含链接的文本消息，并追问"这个文档内容是什么"
+      let interactiveCardUrl: string | undefined;
+      if (hasReply && repliedMsgInText) {
+        const repliedContentObj = typeof repliedMsgInText.content === 'object'
+          ? repliedMsgInText.content
+          : (() => { try { return JSON.parse(repliedMsgInText.content); } catch { return null; } })();
+        const repliedText = repliedContentObj?.text || repliedMsgInText.text || '';
+        const extractedUrl = extractFirstUrlFromText(repliedText);
+        if (extractedUrl) {
+          interactiveCardUrl = extractedUrl;
         }
       }
 
-      const text = textParts.join('') || (imageUrls.length > 0 ? '[图片]' : (downloadCodes.length > 0 ? '[媒体文件]' : '[富文本消息]'));
-      return { text, messageType: 'richText', imageUrls, downloadCodes, fileNames, atDingtalkIds: [], atMobiles: [] };
+      return {
+        text,
+        messageType: hasReply ? 'reply' : 'text',
+        imageUrls,
+        downloadCodes,
+        fileNames,
+        atDingtalkIds,
+        atMobiles,
+        interactiveCardUrl,
+      };
+    }
+    case 'richText': {
+      // 兼容 content 为 JSON 字符串的情况
+      const content = resolveContent(data);
+      const textParts: string[] = [];
+
+      // 兼容新结构 content.richText 和旧结构 richText.richTextList
+      const richList: any[] =
+        content?.richText ||
+        data?.richText?.richTextList ||
+        [];
+
+      for (const item of richList) {
+        const isSkillItem = item.type === 'skill' || !!item.skillData;
+
+        if (item.text && !isSkillItem) {
+          textParts.push(item.text);
+        }
+
+        if (isSkillItem && item.skillData) {
+          // 将 skillData 转换为 <skill> 标签，供下游识别斜杠命令
+          const skillId = item.skillData.skillId || '';
+          const displayName = item.skillData.displayName || '';
+          const iconUrl = item.skillData.iconUrl || '';
+          const skillTag = iconUrl
+            ? `<skill data-id="${skillId}" data-name="${displayName}" icon="${iconUrl}">`
+            : `<skill data-id="${skillId}" data-name="${displayName}">`;
+          textParts.push(skillTag);
+        }
+
+        if (item.pictureUrl) {
+          // pictureUrl 在 imageUrls 里处理，文本部分不需要占位
+        }
+      }
+
+      // 检测引用消息（isReplyMsg + repliedMsg 在 content 对象内）
+      const hasReply = !!content?.isReplyMsg;
+      const quotedText = extractQuotedMsgText(content, 3);
+      if (quotedText) textParts.push(quotedText);
+
+      const richTextMedia = extractRichTextMediaAttachments(data, content);
+
+      // 同时提取引用消息中的媒体附件（richText 引用图片场景）
+      const repliedMsgInRichText = content?.repliedMsg;
+      const repliedMedia = extractRepliedMsgMediaAttachments(repliedMsgInRichText);
+
+      const imageUrls = [...richTextMedia.imageUrls, ...repliedMedia.imageUrls];
+      const downloadCodes = [...richTextMedia.downloadCodes, ...repliedMedia.downloadCodes];
+      const fileNames = [...richTextMedia.fileNames, ...repliedMedia.fileNames];
+
+      const text =
+        textParts.join('') ||
+        (imageUrls.length > 0 ? '[图片]' : downloadCodes.length > 0 ? '[媒体文件]' : '[富文本消息]');
+
+      return {
+        text,
+        messageType: hasReply ? 'reply' : 'richText',
+        imageUrls,
+        downloadCodes,
+        fileNames,
+        atDingtalkIds: [],
+        atMobiles: [],
+      };
     }
     case 'picture': {
-      const downloadCode = data.content?.downloadCode || '';
-      const pictureUrl = data.content?.pictureUrl || '';
+      const content = resolveContent(data);
+      const downloadCode = content?.downloadCode || '';
+      const pictureUrl = content?.pictureUrl || '';
       const imageUrls: string[] = [];
       const downloadCodes: string[] = [];
 
@@ -213,46 +472,55 @@ export function extractMessageContent(data: any): ExtractedMessage {
       return { text: '[图片]', messageType: 'picture', imageUrls, downloadCodes, fileNames: [], atDingtalkIds: [], atMobiles: [] };
     }
     case 'audio': {
-      const audioDownloadCode = data.content?.downloadCode || '';
-      const audioFileName = data.content?.fileName || 'audio.amr';
+      const content = resolveContent(data);
+      // 兼容旧结构 /audio/recognition
+      const recognition =
+        content?.recognition ||
+        data?.audio?.recognition ||
+        '[语音消息]';
+      const audioDownloadCode = content?.downloadCode || '';
+      const audioFileName = content?.fileName || 'audio.amr';
       const downloadCodes: string[] = [];
       const fileNames: string[] = [];
       if (audioDownloadCode) {
         downloadCodes.push(audioDownloadCode);
         fileNames.push(audioFileName);
       }
-      return { 
-        text: data.content?.recognition || '[语音消息]', 
-        messageType: 'audio', 
-        imageUrls: [], 
-        downloadCodes, 
-        fileNames, 
-        atDingtalkIds: [], 
-        atMobiles: [] 
+      return {
+        text: recognition,
+        messageType: 'audio',
+        imageUrls: [],
+        downloadCodes,
+        fileNames,
+        atDingtalkIds: [],
+        atMobiles: [],
       };
     }
     case 'video': {
-      const videoDownloadCode = data.content?.downloadCode || '';
-      const videoFileName = data.content?.fileName || 'video.mp4';
+      const content = resolveContent(data);
+      const videoDownloadCode = content?.downloadCode || '';
+      const videoFileName = content?.fileName || 'video.mp4';
       const downloadCodes: string[] = [];
       const fileNames: string[] = [];
       if (videoDownloadCode) {
         downloadCodes.push(videoDownloadCode);
         fileNames.push(videoFileName);
       }
-      return { 
-        text: '[视频]', 
-        messageType: 'video', 
-        imageUrls: [], 
-        downloadCodes, 
-        fileNames, 
-        atDingtalkIds: [], 
-        atMobiles: [] 
+      return {
+        text: '[视频]',
+        messageType: 'video',
+        imageUrls: [],
+        downloadCodes,
+        fileNames,
+        atDingtalkIds: [],
+        atMobiles: [],
       };
     }
     case 'file': {
-      const fileName = data.content?.fileName || '文件';
-      const downloadCode = data.content?.downloadCode || '';
+      const content = resolveContent(data);
+      // 兼容旧结构 /file/fileName
+      const fileName = content?.fileName || data?.file?.fileName || '文件';
+      const downloadCode = content?.downloadCode || '';
       const downloadCodes: string[] = [];
       const fileNames: string[] = [];
       if (downloadCode) {
@@ -261,19 +529,130 @@ export function extractMessageContent(data: any): ExtractedMessage {
       }
       return { text: `[文件: ${fileName}]`, messageType: 'file', imageUrls: [], downloadCodes, fileNames, atDingtalkIds: [], atMobiles: [] };
     }
+    case 'markdown': {
+      // 钉钉 markdown 消息内容在 data.text.content（与 text 类型一致），不在 data.content
+      const text = data.text?.content?.trim() || resolveContent(data)?.text?.trim() || '[markdown消息]';
+      return { text, messageType: 'markdown', imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [] };
+    }
+    case 'actionCard': {
+      const content = resolveContent(data);
+      const title = content?.title?.trim() || '';
+      const body = content?.text?.trim() || '';
+      // 提取操作链接列表
+      const actionUrlItems: any[] = content?.actionUrlItemList || [];
+      const actionUrls = actionUrlItems
+        .map((item: any) => item.actionUrl?.trim())
+        .filter((url: string) => !!url);
+
+      const sections: string[] = [];
+      if (title) sections.push(title);
+      if (body) sections.push(body);
+      if (actionUrls.length > 0) {
+        const linkSection =
+          actionUrls.length === 1
+            ? `操作链接：${actionUrls[0]}`
+            : `操作链接：\n- ${actionUrls.join('\n- ')}`;
+        sections.push(linkSection);
+      }
+
+      const text = sections.length > 0 ? sections.join('\n\n') : '[actionCard消息]';
+      // 单个操作链接时作为 actionCardUrl 传给下游做 URL 路由
+      const actionCardUrl = actionUrls.length === 1 ? actionUrls[0] : undefined;
+      return { text, messageType: 'actionCard', imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [], actionCardUrl };
+    }
     case 'interactiveCard': {
       // 交互式卡片消息（通常是文档分享）
-      const actionUrl = data.content?.biz_custom_action_url || '';
-      if (actionUrl) {
-        // 提取文档链接并格式化
-        const text = `[钉钉文档]\n🔗 ${actionUrl}`;
-        return { text, messageType: 'interactiveCard', imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [] };
+      const content = resolveContent(data);
+      // 兼容 content 字段不存在时直接从顶层取（repliedMsg 透传场景）
+      const interactiveCardUrl =
+        (content?.biz_custom_action_url || data?.biz_custom_action_url || '').trim() || undefined;
+      if (interactiveCardUrl) {
+        const text = `收到交互式卡片链接：${interactiveCardUrl}`;
+        return { text, messageType: 'interactiveCard', imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [], interactiveCardUrl };
       }
-      return { text: '[交互式卡片]', messageType: 'interactiveCard', imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [] };
+      return { text: '[interactiveCard消息]', messageType: 'interactiveCard', imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [] };
+    }
+    case 'reply': {
+      // 显式 reply 类型（部分钉钉版本直接发 msgtype=reply）
+      // 优先从 data.text 取引用容器，取不到再从 content 取
+      const replyContainer = data.text || resolveContent(data);
+      const bodyText = data.text?.content?.trim() || '';
+      const quotedText = extractQuotedMsgText(replyContainer, 3);
+      const text = quotedText ? `${bodyText}\n${quotedText}` : bodyText || '[引用消息]';
+
+      // 提取引用中的媒体附件
+      const repliedMsg = data.text?.repliedMsg || resolveContent(data)?.repliedMsg;
+      const { imageUrls, downloadCodes, fileNames } = extractRepliedMsgMediaAttachments(repliedMsg);
+
+      return { text, messageType: 'reply', imageUrls, downloadCodes, fileNames, atDingtalkIds: [], atMobiles: [] };
     }
     default:
-      return { text: data.text?.content?.trim() || `[${msgtype}消息]`, messageType: msgtype, imageUrls: [], downloadCodes: [], fileNames: [], atDingtalkIds: [], atMobiles: [] };
+      return {
+        text: data.text?.content?.trim() || `[${msgtype}消息]`,
+        messageType: msgtype,
+        imageUrls: [],
+        downloadCodes: [],
+        fileNames: [],
+        atDingtalkIds: [],
+        atMobiles: [],
+      };
   }
+}
+
+// ============ 卡片链接路由 system prompt ============
+
+/**
+ * 从文本内容中提取第一个 HTTP/HTTPS URL。
+ * 用于处理引用消息文本里直接粘贴链接的场景（如引用一条含 alidocs 链接的文本消息）。
+ */
+function extractFirstUrlFromText(text: string): string | null {
+  const urlMatch = text.match(/https?:\/\/[^\s\u3000\u3001\uff0c\u3002\uff01\uff1f"'<>]+/);
+  return urlMatch ? urlMatch[0].trim() : null;
+}
+
+/**
+ * 根据消息中的 interactiveCardUrl / actionCardUrl 构建链接路由 system prompt。
+ * 对齐 Rust agent_support.rs 的 build_link_routing_prompt 逻辑：
+ * - alidocs.dingtalk.com → 使用 dws skill 的 doc 能力读取
+ * - 其他 URL → 使用 read_url 读取
+ * 返回 null 表示无需注入额外 prompt。
+ */
+function buildLinkRoutingPrompt(content: ExtractedMessage): string | null {
+  const interactiveCardUrl = content.interactiveCardUrl?.trim();
+  const actionCardUrl = content.actionCardUrl?.trim();
+
+  const linkUrl = interactiveCardUrl || actionCardUrl;
+  if (!linkUrl) return null;
+
+  const cardKind = interactiveCardUrl ? 'interactive card' : 'action card';
+
+  let host: string | null = null;
+  try {
+    host = new URL(linkUrl).hostname;
+  } catch {
+    // URL 解析失败，当作普通链接处理
+  }
+
+  if (host === 'alidocs.dingtalk.com') {
+    return [
+      `The inbound DingTalk message is an ${cardKind} with a document link.`,
+      `Linked URL: ${linkUrl}`,
+      `This URL is hosted on \`alidocs.dingtalk.com\`.`,
+      `You MUST inspect and summarize it via the \`dws\` skill using its \`doc\` product capability.`,
+      `If \`dws\` is not already visible in the skill snapshot, call \`search_skills\` to locate it, then call \`use_skill\` with the exact id.`,
+      `Never switch to browser-based reading for this link. Browser incompatibility or markdown export limitations are not final answers.`,
+      `Do not use \`read_url\` for this link.`,
+      `Reply to the DingTalk user with a concise summary of the linked document content.`,
+    ].join('\n');
+  }
+
+  return [
+    `The inbound DingTalk message is an ${cardKind} with a link.`,
+    `Linked URL: ${linkUrl}`,
+    `For this URL, you MUST use \`read_url\` to inspect the linked content before answering.`,
+    `Do not use the \`dws\` skill for this link.`,
+    `Reply to the DingTalk user with a concise summary of the linked content.`,
+  ].join('\n');
 }
 
 // ============ 图片下载 ============
@@ -1032,6 +1411,19 @@ export async function handleDingTalkMessageInternal(params: HandleMessageParams)
       asyncMode,
       preCreatedCard: params.preCreatedCard,
     });
+
+    // ===== 构建卡片链接路由指令（对齐 Rust agent_support.rs build_link_routing_prompt）=====
+    // 识别 interactiveCard / actionCard 消息中的 URL，根据 host 注入不同的 AI 指令：
+    // - alidocs.dingtalk.com → 使用 dingtalk-workspace skill 读取（同时尝试 doc 和 AI table workflow）
+    // - 其他 URL → 使用 read_url 读取
+    // 注：SDK 的 replyOptions 不支持 extraSystemPrompt，改为追加到消息内容中传递给 AI
+    const linkRoutingPrompt = buildLinkRoutingPrompt(content);
+    if (linkRoutingPrompt) {
+      finalContent = finalContent
+        ? `${finalContent}\n\n${linkRoutingPrompt}`
+        : linkRoutingPrompt;
+      log?.info?.(`注入卡片链接路由指令: ${linkRoutingPrompt.slice(0, 100)}...`);
+    }
 
     // 使用 SDK 的 dispatchReplyFromConfig
     const dispatchResult = await core.channel.reply.withReplyDispatcher({

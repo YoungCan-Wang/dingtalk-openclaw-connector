@@ -5,6 +5,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+// form-data 是 CJS 模块，静态 import 可确保 jiti/ESM 环境下 CJS 互操作行为稳定，
+// 避免动态 import 时 .default 偶发为 undefined 导致 "Cannot read properties of undefined (reading 'registry')"
+import FormData from 'form-data';
 import type { DingtalkConfig } from '../types/index.ts';
 import { DINGTALK_OAPI, getOapiAccessToken } from '../utils/index.ts';
 import { dingtalkHttp, dingtalkOapiHttp } from '../utils/http-client.ts';
@@ -89,8 +92,6 @@ export async function uploadMediaToDingTalk(
   log?: any,
 ): Promise<UploadResult | null> {
   try {
-    const FormData = (await import('form-data')).default;
-
     const absPath = toLocalPath(filePath);
     log?.info?.(`开始上传，文件路径：${absPath}`);
     

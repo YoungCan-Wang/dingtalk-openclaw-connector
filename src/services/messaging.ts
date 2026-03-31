@@ -211,7 +211,17 @@ export async function sendNormalToUser(
   const { msgType = "text", title, log } = options;
   const userIdArray = Array.isArray(userIds) ? userIds : [userIds];
 
-  const payload = buildMsgPayload(msgType, content, title);
+  // ✅ 后处理：上传本地图片到钉钉，替换 markdown 图片语法中的本地路径为 media_id
+  let processedContent = content;
+  const oapiToken = await getOapiAccessToken(config);
+  if (oapiToken) {
+    log?.info?.(`[sendNormalToUser] 开始图片后处理`);
+    processedContent = await processLocalImages(content, oapiToken, log);
+  } else {
+    log?.warn?.(`[sendNormalToUser] 无法获取 oapiToken，跳过媒体后处理`);
+  }
+
+  const payload = buildMsgPayload(msgType, processedContent, title);
   if ("error" in payload) {
     return { ok: false, error: payload.error, usedAICard: false };
   }
@@ -278,7 +288,17 @@ export async function sendNormalToGroup(
 ): Promise<SendResult> {
   const { msgType = "text", title, log } = options;
 
-  const payload = buildMsgPayload(msgType, content, title);
+  // ✅ 后处理：上传本地图片到钉钉，替换 markdown 图片语法中的本地路径为 media_id
+  let processedContent = content;
+  const oapiToken = await getOapiAccessToken(config);
+  if (oapiToken) {
+    log?.info?.(`[sendNormalToGroup] 开始图片后处理`);
+    processedContent = await processLocalImages(content, oapiToken, log);
+  } else {
+    log?.warn?.(`[sendNormalToGroup] 无法获取 oapiToken，跳过媒体后处理`);
+  }
+
+  const payload = buildMsgPayload(msgType, processedContent, title);
   if ("error" in payload) {
     return { ok: false, error: payload.error, usedAICard: false };
   }

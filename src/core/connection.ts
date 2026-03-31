@@ -12,6 +12,7 @@
  * - 详细的消息接收日志（三阶段：接收、解析、处理）
  * - 连接统计和监控（每分钟输出）
  */
+import * as fs from 'fs';
 import type { ClawdbotConfig, RuntimeEnv } from "openclaw/plugin-sdk";
 import type { ResolvedDingtalkAccount } from "../types/index.ts";
 import {
@@ -99,6 +100,30 @@ export async function monitorSingleAccount(
         `clientId length=${clientIdStr.length}, clientSecret length=${clientSecretStr.length}. ` +
         `Credentials appear to be too short or invalid.`,
     );
+  }
+
+  // ============ 修复 macOS LaunchAgent 环境下的文件描述符问题 ============
+  //
+  // 在 macOS LaunchAgent/daemon 环境下，进程启动时 stdin/stdout/stderr（fd 0/1/2）
+  // 可能无效（EBADF），导致 Node.js 的 net.Socket 在创建 TCP 连接时出现 EBADF 错误。
+  // 通过打开 /dev/null 来确保 fd 0/1/2 有效，避免 socket 创建时使用无效的 fd。
+  //
+  // 参考：OpenClaw issue #8021 (spawn EBADF on macOS with Node.js 22+)
+  if (process.platform === 'darwin') {
+    for (const stdioFd of [0, 1, 2]) {
+      try {
+        fs.fstatSync(stdioFd);
+      } catch (fdError: any) {
+        if (fdError.code === 'EBADF') {
+          logger.warn(`[LaunchAgent] 检测到 fd ${stdioFd} 无效（EBADF），重定向到 /dev/null 以防止 TCP socket 创建失败`);
+          try {
+            fs.openSync('/dev/null', stdioFd === 0 ? 'r' : 'w');
+          } catch (openError: any) {
+            logger.warn(`[LaunchAgent] 无法修复 fd ${stdioFd}: ${openError.message}`);
+          }
+        }
+      }
+    }
   }
 
   logger.info(`Starting DingTalk Stream client...`);

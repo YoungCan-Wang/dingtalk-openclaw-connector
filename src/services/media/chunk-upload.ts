@@ -12,6 +12,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createLogger } from '../../utils/logger.ts';
 import { dingtalkOapiHttp, dingtalkUploadHttp } from '../../utils/http-client.ts';
+// form-data 是 CJS 模块，静态 import 可确保 jiti/ESM 环境下 CJS 互操作行为稳定，
+// 避免动态 import 时 .default 偶发为 undefined 导致 "Cannot read properties of undefined (reading 'registry')"
+import FormData from 'form-data';
 
 const DINGTALK_OAPI = 'https://oapi.dingtalk.com';
 
@@ -62,7 +65,6 @@ export async function enableUploadTransaction(
   try {
     log.info(`开启上传事务：${fileName}, 大小：${(fileSize / 1024 / 1024).toFixed(2)}MB`);
 
-    const FormData = (await import('form-data')).default;
     const form = new FormData();
     form.append('file_name', fileName);
     form.append('file_size', fileSize.toString());
@@ -113,7 +115,6 @@ export async function uploadFileBlock(
   try {
     log.info(`上传块 ${chunkNumber}/${totalChunks}, 大小：${(chunkData.length / 1024).toFixed(2)}KB`);
 
-    const FormData = (await import('form-data')).default;
     const form = new FormData();
     form.append('upload_id', uploadId);
     form.append('chunk_number', chunkNumber.toString());

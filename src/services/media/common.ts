@@ -59,7 +59,8 @@ export function toLocalPath(raw: string): string {
 }
 
 /**
- * 通用媒体文件上传函数
+ * 谨慎使用，返回的是cleanMediaId
+ * 后续逐步删除，可用 media.ts
  */
 export async function uploadMediaToDingTalk(
   filePath: string,

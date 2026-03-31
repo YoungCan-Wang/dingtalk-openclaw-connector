@@ -26,6 +26,7 @@ const {
   logTypingFailure,
 } = channelRuntimeModule;
 
+import { createLoggerFromConfig } from "./utils/logger.ts";
 import { resolveDingtalkAccount } from "./config/accounts.ts";
 import { getDingtalkRuntime } from "./runtime.ts";
 import type { DingtalkConfig } from "./types/index.ts";
@@ -84,29 +85,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
   });
 
   // ✅ 读取 debug 配置
-  const debugMode = account.config?.debug || false;
-  const log = {
-    info: (msg: string) => {
-      if (debugMode) {
-        params.runtime.info?.(msg);
-      }
-    },
-    error: (msg: string) => {
-      if (debugMode) {
-        params.runtime.error?.(msg);
-      }
-    },
-    warn: (msg: string) => {
-      if (debugMode) {
-        params.runtime.warn?.(msg);
-      }
-    },
-    debug: (msg: string) => {
-      if (debugMode) {
-        params.runtime.debug?.(msg);
-      }
-    },
-  };
+  const log = createLoggerFromConfig(account.config, `DingTalk:${accountId}`);
 
   // AI Card 状态管理
   let currentCardTarget: AICardTarget | null = null;
@@ -279,10 +258,16 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
   };
 
   const closeStreaming: () => Promise<void> = async () => {
-    if (!currentCardTarget) {
+    // 立即捕获并清空，防止并发调用重复执行（竞争条件保护）
+    // closeStreaming 可能被 onIdle 和 onError 同时触发，若不在此处清空，
+    // 第一次调用的 finally 块会将 currentCardTarget 置 null，
+    // 导致第二次调用的 finishAICard 收到 null 参数而崩溃
+    const cardSnapshot = currentCardTarget;
+    if (!cardSnapshot) {
       log.info(`[DingTalk][closeStreaming] 无 AI Card，跳过关闭`);
       return;
     }
+    currentCardTarget = null;
 
     log.info(`[DingTalk][closeStreaming] 开始关闭 AI Card...`);
 
@@ -356,7 +341,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
 
       log.info(`[DingTalk][closeStreaming] 准备调用 finishAICard，文本长度=${finalText.length}`);
       await finishAICard(
-        currentCardTarget as any,
+        cardSnapshot as any,
         finalText,
         account.config as DingtalkConfig,
         log
@@ -386,7 +371,7 @@ export function createDingtalkReplyDispatcher(params: CreateDingtalkReplyDispatc
         }
       }
     } finally {
-      currentCardTarget = null;
+      // currentCardTarget 已在函数开头清空，此处只需重置累积文本
       accumulatedText = "";
     }
   };

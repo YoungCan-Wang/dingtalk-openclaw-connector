@@ -1,5 +1,4 @@
 import type {
-  ChannelMeta,
   ChannelPlugin,
   ClawdbotConfig,
 } from "openclaw/plugin-sdk";
@@ -30,32 +29,16 @@ import { monitorDingtalkProvider } from "./core/provider.ts";
 import { sendTextToDingTalk, sendMediaToDingTalk } from "./services/messaging/index.ts";
 import type { ResolvedDingtalkAccount, DingtalkConfig } from "./types/index.ts";
 
-const meta: ChannelMeta = {
+const meta = {
   id: "dingtalk-connector",
   label: "DingTalk",
   selectionLabel: "DingTalk (钉钉)",
   docsPath: "/channels/dingtalk-connector",
   docsLabel: "dingtalk-connector",
   blurb: "钉钉企业内部机器人，使用 Stream 模式，无需公网 IP，支持 AI Card 流式响应。",
-  aliases: ["dd", "ding"],
+  aliases: ["dd", "ding"] as string[],
   order: 70,
 };
-
-const secretInputJsonSchema = {
-  oneOf: [
-    { type: "string" },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["source", "provider", "id"],
-      properties: {
-        source: { type: "string", enum: ["env", "file", "exec"] },
-        provider: { type: "string", minLength: 1 },
-        id: { type: "string", minLength: 1 },
-      },
-    },
-  ],
-} as const;
 
 export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
   id: "dingtalk-connector",
@@ -100,22 +83,16 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
       properties: {
         enabled: { type: "boolean" },
         defaultAccount: { type: "string" },
-        clientId: { oneOf: [{ type: "string" }, { type: "number" }] },
-        clientSecret: secretInputJsonSchema,
+        clientId: { type: "string" },
+        clientSecret: { type: "string" },
         enableMediaUpload: { type: "boolean" },
         systemPrompt: { type: "string" },
         dmPolicy: { type: "string", enum: ["open", "pairing", "allowlist"] },
-        allowFrom: { type: "array", items: { oneOf: [{ type: "string" }, { type: "number" }] } },
+        allowFrom: { type: "array", items: { type: "string" } },
         groupPolicy: { type: "string", enum: ["open", "allowlist", "disabled"] },
-        groupAllowFrom: {
-          type: "array",
-          items: { oneOf: [{ type: "string" }, { type: "number" }] },
-        },
+        groupAllowFrom: { type: "array", items: { type: "string" } },
         requireMention: { type: "boolean" },
-        groupSessionScope: {
-          type: "string",
-          enum: ["group", "group_sender"],
-        },
+        groupSessionScope: { type: "string", enum: ["group", "group_sender"] },
         separateSessionByConversation: { type: "boolean" },
         sharedMemoryAcrossConversations: { type: "boolean" },
         historyLimit: { type: "integer", minimum: 0 },
@@ -124,6 +101,10 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
         mediaMaxMb: { type: "number", minimum: 0 },
         typingIndicator: { type: "boolean" },
         resolveSenderNames: { type: "boolean" },
+        asyncMode: { type: "boolean" },
+        ackText: { type: "string" },
+        endpoint: { type: "string" },
+        debug: { type: "boolean" },
         tools: {
           type: "object",
           additionalProperties: false,
@@ -146,12 +127,9 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
                 },
               },
               enabled: { type: "boolean" },
-              allowFrom: { type: "array", items: { oneOf: [{ type: "string" }, { type: "number" }] } },
+              allowFrom: { type: "array", items: { type: "string" } },
               systemPrompt: { type: "string" },
-              groupSessionScope: {
-                type: "string",
-                enum: ["group", "group_sender"],
-              },
+              groupSessionScope: { type: "string", enum: ["group", "group_sender"] },
             },
           },
         },
@@ -162,28 +140,27 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
             properties: {
               enabled: { type: "boolean" },
               name: { type: "string" },
-              clientId: { oneOf: [{ type: "string" }, { type: "number" }] },
-              clientSecret: secretInputJsonSchema,
+              clientId: { type: "string" },
+              clientSecret: { type: "string" },
               enableMediaUpload: { type: "boolean" },
               systemPrompt: { type: "string" },
               dmPolicy: { type: "string", enum: ["open", "pairing", "allowlist"] },
-              allowFrom: { type: "array", items: { oneOf: [{ type: "string" }, { type: "number" }] } },
+              allowFrom: { type: "array", items: { type: "string" } },
               groupPolicy: { type: "string", enum: ["open", "allowlist", "disabled"] },
-              groupAllowFrom: {
-                type: "array",
-                items: { oneOf: [{ type: "string" }, { type: "number" }] },
-              },
+              groupAllowFrom: { type: "array", items: { type: "string" } },
               requireMention: { type: "boolean" },
-              groupSessionScope: {
-                type: "string",
-                enum: ["group", "group_sender"],
-              },
+              groupSessionScope: { type: "string", enum: ["group", "group_sender"] },
               separateSessionByConversation: { type: "boolean" },
               sharedMemoryAcrossConversations: { type: "boolean" },
               historyLimit: { type: "integer", minimum: 0 },
+              dmHistoryLimit: { type: "integer", minimum: 0 },
               textChunkLimit: { type: "integer", minimum: 1 },
               mediaMaxMb: { type: "number", minimum: 0 },
               typingIndicator: { type: "boolean" },
+              asyncMode: { type: "boolean" },
+              ackText: { type: "string" },
+              endpoint: { type: "string" },
+              debug: { type: "boolean" },
               tools: {
                 type: "object",
                 additionalProperties: false,
@@ -342,7 +319,7 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
       };
     },
   },
-  onboarding: dingtalkOnboardingAdapter,
+  setupWizard: dingtalkOnboardingAdapter as any,
   messaging: {
     normalizeTarget: (raw) => normalizeDingtalkTarget(raw) ?? undefined,
     targetResolver: {
@@ -465,7 +442,7 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
     },
   },
   status: {
-    defaultRuntime: createDefaultChannelRuntimeState(DEFAULT_ACCOUNT_ID, { port: null }),
+    defaultRuntime: createDefaultChannelRuntimeState(DEFAULT_ACCOUNT_ID, { port: null }) as any,
     buildChannelSummary: ({ snapshot }) => ({
       // 只返回 probe 相关字段，不透传运行时字段（running/lastStartAt 等）。
       // 运行时状态由框架从 store.runtimes 自动维护，buildChannelSummary 在 probe
@@ -572,7 +549,7 @@ export const dingtalkPlugin: ChannelPlugin<ResolvedDingtalkAccount> = {
         });
       } catch (err: any) {
         // 打印真实错误到 stderr，绕过框架 log 系统（框架的 runtime.log 可能未初始化）
-        ctx.log?.error(`[dingtalk-connector][${ctx.accountId}] startAccount error:`, err?.message ?? err, err?.stack);
+        ctx.log?.error(`[dingtalk-connector][${ctx.accountId}] startAccount error: ${err?.message ?? err}\n${err?.stack ?? ''}`);
         throw err;
       }
     },

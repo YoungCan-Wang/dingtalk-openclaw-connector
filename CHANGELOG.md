@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9] - 2026-03-31
+
+### 新增 / Added
+- ✨ **引用消息完整解析** - 新增 `extractQuotedMsgText` 递归解析引用消息（最多 3 层嵌套），支持 text、richText、picture、video、audio、file、markdown、interactiveCard 等消息类型，自动提取引用中的媒体附件和链接  
+  **Quoted message full parsing** - Added recursive quoted message parsing (up to 3 levels) with media attachment and URL extraction
+
+- ✨ **新增配置项 asyncMode / ackText / endpoint / debug** - `configSchema` 新增四个配置字段，账号级别新增 `dmHistoryLimit` 支持  
+  **New config options** - Added `asyncMode`, `ackText`, `endpoint`, `debug` to configSchema, and `dmHistoryLimit` at account level
+
+- ✨ **普通消息本地图片后处理** - `sendNormalToUser` 和 `sendNormalToGroup` 新增本地图片上传后处理，发送普通消息时自动替换本地图片路径为 media_id  
+  **Local image post-processing for normal messages** - Added automatic local image upload and replacement in `sendNormalToUser` and `sendNormalToGroup`
+
+### 修复 / Fixes
+- 🐛 **macOS LaunchAgent 环境 WebSocket 连接失败** - 修复 macOS LaunchAgent/daemon 环境下 fd 0/1/2 无效（EBADF）导致 TCP 连接创建失败的问题  
+  **WebSocket connection failure on macOS LaunchAgent** - Fixed EBADF errors on macOS LaunchAgent environments by redirecting invalid file descriptors to `/dev/null`
+
+- 🐛 **AI Card 流式关闭竞争条件** - 修复 `closeStreaming` 被 `onIdle` 和 `onError` 同时触发时的竞争条件，采用 snapshot 模式防止并发崩溃  
+  **AI Card streaming close race condition** - Fixed race condition in `closeStreaming` using snapshot pattern to prevent concurrent crashes
+
+- 🐛 **FormData CJS 互操作问题** - 将 `form-data` 从动态 import 改为静态 import，修复 jiti/ESM 环境下 `.default` 偶发为 undefined 的问题  
+  **FormData CJS interop issue** - Changed `form-data` from dynamic to static import, fixing intermittent `.default` undefined errors in jiti/ESM
+
+- 🐛 **纯文本图片路径误转换** - 禁用纯文本中本地图片路径自动转换为图片语法的行为，避免影响用户展示路径文本的场景  
+  **Bare image path false conversion** - Disabled automatic conversion of bare local image paths to image syntax
+
+### 改进 / Improvements
+- ✅ **Zod Schema 拆分兼容 Web UI** - 将 `DingtalkConfigSchema` 拆分为 `DingtalkConfigBaseSchema` 和带 `superRefine` 的完整 Schema，解决 JSON Schema 生成兼容性问题  
+  **Zod Schema split for Web UI compatibility** - Split schema to fix `buildChannelConfigSchema` JSON Schema generation
+
+- ✅ **configSchema 类型简化** - 将 `clientId`、`clientSecret` 等字段从 `oneOf` 联合类型简化为单一 `string` 类型  
+  **configSchema type simplification** - Simplified JSON Schema from `oneOf` union types to single `string` type
+
+- ✅ **reply-dispatcher logger 统一** - 替换手动构建的 log 对象为 `createLoggerFromConfig`  
+  **reply-dispatcher logger unification** - Replaced manual log object with `createLoggerFromConfig`
+
+- ✅ **锁定 axios 版本到 1.6.0** - 避免自动升级引入不兼容变更  
+  **Pin axios to 1.6.0** - Prevent automatic upgrades from introducing incompatible changes
+
 ## [0.8.8] - 2026-03-29
 
 ### 修复 / Fixes
